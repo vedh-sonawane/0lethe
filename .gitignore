@@ -1,0 +1,20 @@
+# the graph, the cache, and everything the machine recovers at runtime
+/data/
+# the frozen static field (regenerate with: python -m lethe.cli export)
+/site/
+
+# local notes, not part of the machine
+/CLAUDE.md
+
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# editor / os
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

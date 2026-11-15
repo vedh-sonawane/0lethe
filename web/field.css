@@ -1,0 +1,112 @@
+/* Soot. The material, not a mode. Everything else is light scratched out of it. */
+html, body {
+    margin: 0;
+    padding: 0;
+    height: 100%;
+    width: 100%;
+    overflow: hidden;
+    background: #060504;
+    cursor: none;              /* the machine draws its own cursor --- a scratch */
+    overscroll-behavior: none;
+    -webkit-user-select: none;
+    user-select: none;
+    touch-action: none;
+}
+#field {
+    display: block;
+    width: 100vw;
+    height: 100vh;
+    animation: breathe-in 2.8s ease-out both;   /* the world surfacing out of the dark */
+}
+@keyframes breathe-in { from { opacity: 0; } to { opacity: 1; } }
+
+/* The instrument readout: real selectable text scratched onto the soot.
+   No box, no card, no border --- just light where evidence was found. */
+#readout {
+    position: fixed;
+    top: 7vh;
+    left: 38px;
+    width: min(46vw, 540px);
+    max-height: 78vh;
+    overflow-y: auto;
+    color: #e9e3d5;
+    cursor: auto;                 /* a normal caret here, so text can be selected */
+    user-select: text;
+    -webkit-user-select: text;
+    opacity: 0;
+    transition: opacity 0.5s ease;
+    pointer-events: none;
+    /* a whisper of soot behind the text, for legibility over a busy field */
+    -webkit-mask-image: linear-gradient(90deg, #000 0, #000 78%, transparent 100%);
+            mask-image: linear-gradient(90deg, #000 0, #000 78%, transparent 100%);
+    text-shadow: 0 0 10px #060504, 0 0 3px #060504;
+    scrollbar-width: none;
+}
+#readout::-webkit-scrollbar { display: none; }
+#readout.shown { opacity: 1; pointer-events: auto; }
+
+#readout .r-title {
+    font: 400 20px/1.3 "Iowan Old Style","Palatino Linotype","Palatino","Georgia",serif;
+    letter-spacing: .01em; margin-bottom: 4px; color: #f2ede1;
+}
+#readout .r-id {
+    font: 11px/1.4 "SFMono-Regular","Consolas","Liberation Mono",ui-monospace,monospace;
+    color: #8a8780; word-break: break-all; margin-bottom: 12px;
+}
+#readout .r-stand {
+    font: 11px/1.5 "SFMono-Regular","Consolas",ui-monospace,monospace;
+    letter-spacing: .14em; text-transform: uppercase; color: #b9b4a8;
+}
+#readout .r-conf { font: 12px/1 ui-monospace,monospace; color: #9a968c; margin: 6px 0; }
+#readout .r-conf .bar { letter-spacing: -1px; color: #e9e3d5; }
+#readout .r-conf .dim { color: #403c35; }
+#readout .r-summary {
+    font: italic 13px/1.5 "Iowan Old Style","Palatino Linotype","Georgia",serif;
+    color: #a6a197; margin: 10px 0 20px; max-width: 46ch;
+}
+#readout .r-recog { margin: 4px 0 18px; }
+#readout .r-recog-row {
+    font: 11px/1.7 "SFMono-Regular","Consolas",ui-monospace,monospace;
+    color: #9c9789; letter-spacing: .04em;
+}
+#readout .r-recog-row.link { cursor: pointer; transition: color .2s, text-shadow .2s; }
+#readout .r-recog-row.link:hover { color: #f2ede1; text-shadow: 0 0 8px rgba(233,227,213,.4); }
+#readout .r-claim { margin: 0 0 16px; padding-left: 12px; border-left: 1px solid #2a2721; }
+#readout .r-claim.recovered { border-left-color: #6f6a5e; }
+#readout .r-claim.inferred  { border-left-color: #43403a; }
+#readout .r-claim.missing   { border-left-color: #26241f; }
+#readout .r-field {
+    font: 11px/1.6 "SFMono-Regular","Consolas",ui-monospace,monospace;
+    letter-spacing: .16em; text-transform: uppercase; color: #cfc9bb;
+}
+#readout .r-claim.missing .r-field { color: #6e6a60; }
+#readout .r-cmeta {
+    font: 10px/1.6 ui-monospace,monospace; letter-spacing: .08em;
+    text-transform: uppercase; color: #6b675d; margin-left: 10px;
+}
+#readout .r-val {
+    font: 12px/1.45 ui-monospace,monospace; color: #d7d1c3;
+    margin: 4px 0; white-space: pre-wrap; word-break: break-word;
+}
+#readout .r-val.prose {
+    font: 13px/1.55 "Iowan Old Style","Palatino Linotype","Georgia",serif;
+    color: #cbc5b8; max-height: 7.5em; overflow: hidden;
+}
+#readout .r-claim.recovered .r-val { color: #ece6d8; }
+#readout .r-why { font: italic 11px/1.45 "Georgia",serif; color: #86827a; margin: 3px 0; max-width: 52ch; }
+#readout .r-trail {
+    font: 10px/1.5 "SFMono-Regular","Consolas",ui-monospace,monospace;
+    color: #726e64; word-break: break-all;
+}
+/* recovered images: real bytes from the lost page, surfacing out of the soot */
+#readout .r-gallery { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }
+#readout .r-img {
+    max-width: 148px; max-height: 120px; object-fit: contain;
+    background: #0a0908; padding: 3px;
+    border: 1px solid #332f28;
+    filter: contrast(1.06) saturate(0.92) brightness(0.96);
+    box-shadow: 0 0 14px #060504 inset, 0 0 2px #000;
+    animation: surface 1.6s ease-out both;
+}
+@keyframes surface { from { opacity: 0; filter: contrast(0.4) brightness(0.3) blur(3px); }
+                       to { opacity: 1; } }
