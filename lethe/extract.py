@@ -152,16 +152,28 @@ def _norm_target(url: str) -> str:
 
 class _AnchorCtx(HTMLParser):
     """Finds how a surviving page refers to one particular (lost) target: the
-    anchor text of each link to it, and the words immediately around that link."""
+    anchor text of each link to it, and a PASSAGE of the words around the link ---
+    before and after --- so a page with no copy can be rebuilt from how others
+    wrote about it, not just from what they called it."""
 
     def __init__(self, base_url: str, target: str) -> None:
         super().__init__(convert_charrefs=True)
         self.base = base_url
         self.target = _norm_target(target)
         self.recent: list[str] = []          # rolling window of preceding text
-        self.cap: dict | None = None
+        self.cap: dict | None = None         # currently inside the anchor
+        self.pending: dict | None = None     # finished anchor; gathering the words after it
         self.hits: list[dict] = []
         self._skip = 0
+
+    def _flush(self) -> None:
+        if self.pending is None:
+            return
+        before = _WS.sub(" ", self.pending["before"]).strip()
+        after = _WS.sub(" ", "".join(self.pending["after"])).strip()
+        passage = (before + "  " + after).strip()
+        self.hits.append({"anchor": self.pending["anchor"], "context": before, "passage": passage})
+        self.pending = None
 
     def handle_starttag(self, tag, attrs):
         if tag in _SKIP:
@@ -172,7 +184,8 @@ class _AnchorCtx(HTMLParser):
             if href:
                 try:
                     if _norm_target(urljoin(self.base, href)) == self.target:
-                        self.cap = {"anchor": [], "before": " ".join(self.recent)[-200:]}
+                        self._flush()
+                        self.cap = {"anchor": [], "before": " ".join(self.recent)[-320:]}
                 except ValueError:
                     pass
 
@@ -181,8 +194,7 @@ class _AnchorCtx(HTMLParser):
             self._skip -= 1
         elif tag == "a" and self.cap is not None:
             anchor = _WS.sub(" ", "".join(self.cap["anchor"])).strip()
-            if anchor or self.cap["before"]:
-                self.hits.append({"anchor": anchor, "context": _WS.sub(" ", self.cap["before"]).strip()})
+            self.pending = {"anchor": anchor, "before": self.cap["before"], "after": [], "n": 0}
             self.cap = None
 
     def handle_data(self, data):
@@ -190,8 +202,13 @@ class _AnchorCtx(HTMLParser):
             return
         if self.cap is not None:
             self.cap["anchor"].append(data)
+        elif self.pending is not None:
+            self.pending["after"].append(data)
+            self.pending["n"] += len(data)
+            if self.pending["n"] >= 340:     # a full passage after the link; close it
+                self._flush()
         self.recent.append(data)
-        if len(self.recent) > 40:
+        if len(self.recent) > 90:
             self.recent.pop(0)
 
 
@@ -203,4 +220,5 @@ def anchor_contexts(html: str, base_url: str, target: str) -> list[dict]:
         p.feed(html)
     except Exception:
         pass
+    p._flush()
     return p.hits

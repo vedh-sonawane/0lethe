@@ -92,6 +92,11 @@ html, body {
     font: 13px/1.55 "Iowan Old Style","Palatino Linotype","Georgia",serif;
     color: #cbc5b8; max-height: 7.5em; overflow: hidden;
 }
+#readout .r-val.r-portrait {
+    max-height: none; overflow: visible; white-space: pre-wrap;
+    color: #d8d2c4; font-size: 13.5px; line-height: 1.6;
+    border-left: 1px solid #332f28; padding-left: 12px; margin: 6px 0 2px;
+}
 #readout .r-claim.recovered .r-val { color: #ece6d8; }
 #readout .r-why { font: italic 11px/1.45 "Georgia",serif; color: #86827a; margin: 3px 0; max-width: 52ch; }
 #readout .r-trail {

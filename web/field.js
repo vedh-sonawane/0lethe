@@ -262,7 +262,7 @@ readout.addEventListener('click', e => {
 function renderReadout() {
     if (!detail) { readout.innerHTML = ''; readout.classList.remove('shown'); return; }
     const g = detail.ghost, rec = detail.reconstruction;
-    const prose = new Set(['body', 'headings', 'outlinks', 'description']);
+    const prose = new Set(['body', 'headings', 'outlinks', 'description', 'portrait', 'testimony']);
     const ticks = n => '<span class="bar">' +
         '▓'.repeat(Math.round((n || 0) * 20)) + '<span class="dim">' +
         '░'.repeat(20 - Math.round((n || 0) * 20)) + '</span></span>';
@@ -301,8 +301,9 @@ function renderReadout() {
             }
             h += `</div>`;
         } else if (c.value) {
-            const v = prose.has(c.field) ? esc(c.value).slice(0, 600) : esc(c.value);
-            h += `<div class="r-val ${prose.has(c.field) ? 'prose' : ''}">${v}</div>`;
+            const lim = c.field === 'portrait' ? 1800 : (prose.has(c.field) ? 700 : 100000);
+            const v = esc(c.value).slice(0, lim);
+            h += `<div class="r-val ${prose.has(c.field) ? 'prose' : ''} ${c.field === 'portrait' ? 'r-portrait' : ''}">${v}</div>`;
         }
         h += `<div class="r-why">${esc(c.rationale)}</div>`;
         for (const t of (c.trail || []).slice(0, 4)) {

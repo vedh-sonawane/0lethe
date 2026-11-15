@@ -118,9 +118,9 @@ def reconstruct_void(conn, void_url: str, *, max_sources: int = 10, log=print) -
             a = (h.get("anchor") or "").strip()
             if a and 1 <= len(a) <= 120:
                 anchors[a] += 1
-            c = (h.get("context") or "").strip()
-            if c and len(c) > len(a) + 4:
-                contexts.append((c[:240], dom))
+            passage = (h.get("passage") or h.get("context") or "").strip()
+            if passage and len(passage) > 30:
+                contexts.append((passage[:340], dom))
     conn.commit()
 
     recon_id = int(conn.execute(
@@ -142,9 +142,24 @@ def reconstruct_void(conn, void_url: str, *, max_sources: int = 10, log=print) -
         label = anchors.most_common(1)[0][0]
         _claim("known_as", named, round(min(0.85, 0.5 + 0.08 * sum(anchors.values())), 3),
                f"the words {len(witnesses)} surviving page(s) used to link to it --- its names in memory")
-    if contexts:
-        _claim("testimony", "\n".join(f"- {c}   [{d}]" for c, d in contexts[:8]), 0.6,
-               "the sentences around the inbound links --- how the surviving web described it")
+    # a readable PORTRAIT: the fullest, most distinct passages the surviving web
+    # wrote around the lost page --- deduplicated so boilerplate collapses, so that
+    # a page with no copy anywhere can still be READ, through its shadows.
+    seen_keys: set = set()
+    distinct: list[tuple[str, str]] = []
+    for c, d in sorted(contexts, key=lambda t: -len(t[0])):
+        key = re.sub(r"[^a-z0-9]", "", c.lower())[:90]
+        if not key or key in seen_keys:
+            continue
+        seen_keys.add(key)
+        distinct.append((c, d))
+        if len(distinct) >= 7:
+            break
+    if distinct:
+        portrait = "\n\n".join(f"“{c}”\n    — as written on {d}" for c, d in distinct)
+        _claim("portrait", portrait, round(min(0.7, 0.4 + 0.06 * len(distinct)), 3),
+               f"paragraphs of how {len(witnesses)} surviving page(s) wrote around and about it --- "
+               f"the lost page, read back through its shadows")
     _claim("referenced_by", str(len(sources)), 0.95,
            f"{len(sources)} distinct site(s) still point at this address --- the convergence that revealed it")
 
