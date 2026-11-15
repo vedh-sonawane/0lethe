@@ -40,7 +40,7 @@ PRESERVE_CAP = 40              # polite ceiling on autonomous Save-Page-Now call
 
 SEED_BATCH = 8            # random articles pulled per seeding
 TOPUP_BELOW = 12          # keep the frontier fed above this many pending leads
-CITATIONS_PER_ARTICLE = 45
+CITATIONS_PER_ARTICLE = 24     # keep a single article's liveness sweep bounded in time
 OUTLINKS_PER_PAGE = 6
 
 

@@ -59,7 +59,7 @@ def check(url: str) -> Liveness:
     DNS/socket level (dead_domain), or it returns 404/410 (not_found). Everything
     else --- 403 blocks, 429 rate-limits, 5xx server errors, TLS failures,
     timeouts --- is *undetermined*, because none of them prove the page is gone."""
-    res = fetch(url, respect_robots=True, timeout=20)
+    res = fetch(url, respect_robots=True, timeout=10)
     if res.error == "disallowed_by_robots":
         return _undetermined(url, None, url, "not permitted to check (robots)")
     if res.status is None:
