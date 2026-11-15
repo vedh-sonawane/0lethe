@@ -13,6 +13,7 @@ and rebuilding the thing itself from them.
 
 from __future__ import annotations
 
+import re
 from collections import Counter
 
 from . import db
@@ -20,6 +21,27 @@ from .detect import check
 from .discover import _host, _norm
 from .extract import anchor_contexts
 from .sources import wayback
+
+
+_STOP = set((
+    "the a an and or of to in on at for with from by is are was were be been it its this that these "
+    "those as his her their our your you we they he she him them who which what when where there here "
+    "not but if then than so too very can will just about into out over under more most some any all "
+    "page site home click here web html new one www com http https net org link links back next also "
+    "have has had do does did would could should may might must been being other same each see get"
+).split())
+_WORD = re.compile(r"[a-z][a-z'\-]{3,}")
+
+
+def _topics(contexts: list[tuple[str, str]], n: int = 6) -> list[str]:
+    """The words that recur across the testimony --- a crude but honest sense of
+    what the lost page was about, taken straight from how others wrote around it."""
+    cnt: Counter = Counter()
+    for c, _ in contexts:
+        for w in _WORD.findall(c.lower()):
+            if w not in _STOP:
+                cnt[w] += 1
+    return [w for w, c in cnt.most_common(n * 3) if c >= 2][:n]
 
 
 def _sources_pointing_at(conn, void_norm: str, *, max_sources: int = 10) -> list[str]:
@@ -79,7 +101,9 @@ def reconstruct_void(conn, void_url: str, *, max_sources: int = 10, log=print) -
     contexts: list[tuple[str, str]] = []
     all_sids: list[int] = []
     witness_gids: list[int] = []
+    witness_isos: list[str] = []
     for identity, cap, hits in witnesses:
+        witness_isos.append(cap.iso)
         wg = conn.execute("SELECT id FROM ghost WHERE identity=?", (identity,)).fetchone()
         if wg and wg["id"] != gid:
             witness_gids.append(int(wg["id"]))
@@ -123,14 +147,32 @@ def reconstruct_void(conn, void_url: str, *, max_sources: int = 10, log=print) -
                "the sentences around the inbound links --- how the surviving web described it")
     _claim("referenced_by", str(len(sources)), 0.95,
            f"{len(sources)} distinct site(s) still point at this address --- the convergence that revealed it")
+
+    # WHEN it existed: inferred from the window in which the world pointed at it.
+    witness_isos.sort()
+    first_iso = witness_isos[0] if witness_isos else None
+    last_iso = witness_isos[-1] if witness_isos else None
+    epoch = None
+    if first_iso:
+        epoch = int(first_iso[:4])
+        _claim("active", f"{first_iso[:10]} .. {last_iso[:10]}", 0.55,
+               "the window in which the surviving web still pointed at it --- when it was part of the living world")
+
+    # WHAT it was about: the words that recur across all the testimony.
+    topics = _topics(contexts)
+    if topics:
+        _claim("about", ", ".join(topics), 0.5,
+               "the subjects that recur across everything that linked to it")
+
     if not live.alive:
         _claim("died", f"gone now ({live.reason})", 0.6, "confirmed absent today")
 
     conn.execute(
         "UPDATE ghost SET kind='web_page', status='reconstructed', label=COALESCE(?,label), "
-        "reference_count=?, worth=?, death_kind=?, updated_at=datetime('now') WHERE id=?",
+        "reference_count=?, worth=?, death_kind=?, existed_from=?, existed_until=?, epoch_year=?, "
+        "updated_at=datetime('now') WHERE id=?",
         (label, len(sources), round(min(0.9, 0.3 + 0.08 * len(sources)), 3),
-         None if live.alive else live.death_kind, gid))
+         None if live.alive else live.death_kind, first_iso, last_iso, epoch, gid))
     # connect the void to the surviving pages it was rebuilt from --- a navigable
     # thread between a lost thing and the things that still remember it
     for wg in witness_gids:
