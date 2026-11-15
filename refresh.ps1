@@ -13,9 +13,8 @@ Set-Location $root
 Write-Host "freezing the field..."
 python -m lethe.cli export site
 
-Write-Host "pushing it live..."
-Set-Location (Join-Path $root "site")
-vercel --prod --yes
+Write-Host "pushing it live (Cloudflare Pages)..."
+# needs: CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID set in your environment
+npx wrangler@latest pages deploy site --project-name=0lethe --branch=main --commit-dirty=true
 
-Set-Location $root
 Write-Host "done. the world remembers a little more."
