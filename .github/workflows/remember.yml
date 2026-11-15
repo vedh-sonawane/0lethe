@@ -1,26 +1,29 @@
-# The machine, running in the cloud --- no computer of yours needed.
+# The machine, running in the cloud --- continuously, no computer of yours needed.
 #
-# On a schedule, GitHub's own servers wake the engine, let it read shadows for a
-# while, freeze the field, push it live, and save the grown graph for next time.
-# It picks up exactly where it left off. You never have to be on.
+# Each run is one long job: it reads shadows WITHOUT STOPPING for ~5.5 hours,
+# redeploying the live field every few minutes and saving the grown graph as it
+# goes. The next job starts the instant this one ends, so the engine effectively
+# never sleeps. (GitHub's scheduler can't go faster than every 5 min and a deploy
+# takes ~a minute, so this --- continuous recovery, a live refresh every few
+# minutes --- is as fast as free infrastructure allows.)
 #
 # One-time setup (repo -> Settings -> Secrets and variables -> Actions):
 #   CLOUDFLARE_API_TOKEN   Cloudflare -> My Profile -> API Tokens -> Create Token
 #                          -> permission: "Account : Cloudflare Pages : Edit"
 #   CLOUDFLARE_ACCOUNT_ID  Cloudflare dashboard -> Workers & Pages -> Account ID
-# Then: Actions tab -> enable workflows -> run "remember" once by hand to test.
+# Then: Actions tab -> enable workflows -> run "remember" once by hand to start it.
 # Your field lives, free, at:  https://0lethe.pages.dev
 
 name: remember
 
 on:
   schedule:
-    - cron: "0 */6 * * *"      # every 6 hours (see note at bottom about free minutes)
-  workflow_dispatch: {}         # and whenever you click "Run workflow"
+    - cron: "0 */5 * * *"       # every 5h a fresh job queues; it starts the moment the previous ends -> no gap
+  workflow_dispatch: {}
 
 concurrency:
   group: remember
-  cancel-in-progress: false
+  cancel-in-progress: false      # never kill a run mid-recovery; the next one waits and continues
 
 permissions:
   contents: write
@@ -28,13 +31,15 @@ permissions:
 jobs:
   remember:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 350         # ~5.8h; GitHub's hard ceiling per job is 6h
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
 
       - name: Restore the graph it has grown so far
         run: |
@@ -47,33 +52,36 @@ jobs:
             echo "first run --- starting from darkness"
           fi
 
-      - name: Read the shadows for a while
-        run: python -m lethe.cli run --minutes 12
-
-      - name: Freeze the field
-        run: python -m lethe.cli export site
-
-      - name: Push the field live (Cloudflare Pages)
+      - name: Remember, without stopping
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-        run: npx wrangler@latest pages deploy site --project-name=0lethe --branch=main --commit-dirty=true
-
-      - name: Save the grown graph for next time
         run: |
-          tmp="$(mktemp -d)"
-          gzip -c data/lethe.sqlite > "$tmp/lethe.sqlite.gz"
-          cd "$tmp"
-          git init -q
-          git config user.name "0lethe"
-          git config user.email "0lethe@users.noreply.github.com"
-          git checkout -q -b state
-          git add lethe.sqlite.gz
-          git commit -q -m "state $(date -u +%FT%TZ)"
-          git push -f "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" state
+          npm i -g wrangler@latest >/dev/null 2>&1
 
-# Note on free minutes:
-#   Private repos get 2000 free Action-minutes/month. This runs ~15 min, 4x/day
-#   ~= 1800/month --- just under. If you want it running far more often for free,
-#   make the repo PUBLIC (Actions are unlimited on public repos) --- which also
-#   fits the spirit: a thing anyone could stumble onto.
+          save_state () {
+            local tmp; tmp="$(mktemp -d)"
+            gzip -c data/lethe.sqlite > "$tmp/lethe.sqlite.gz"
+            ( cd "$tmp" \
+              && git init -q \
+              && git config user.name "0lethe" \
+              && git config user.email "0lethe@users.noreply.github.com" \
+              && git checkout -q -b state \
+              && git add lethe.sqlite.gz \
+              && git commit -q -m "state $(date -u +%FT%TZ)" \
+              && git push -f "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" state )
+          }
+
+          deadline=$(( $(date +%s) + 19500 ))    # work ~5.4h, leaving room for a final save
+          cycle=0
+          while [ "$(date +%s)" -lt "$deadline" ]; do
+            python -m lethe.cli run --minutes 9 || true     # a batch of continuous recovery
+            python -m lethe.cli export site || true         # freeze the field
+            wrangler pages deploy site --project-name=0lethe --branch=main --commit-dirty=true || true
+            cycle=$(( cycle + 1 ))
+            if [ $(( cycle % 3 )) -eq 0 ]; then save_state || true; fi   # persist the graph ~every 30 min
+          done
+          save_state || true
+
+# If Cloudflare ever complains about deploy frequency, raise the per-batch minutes
+# (e.g. --minutes 20) so it deploys less often while still recovering non-stop.
