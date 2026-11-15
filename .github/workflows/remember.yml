@@ -1,0 +1,82 @@
+# The machine, running in the cloud --- no computer of yours needed.
+#
+# On a schedule, GitHub's own servers wake the engine, let it read shadows for a
+# while, freeze the field, push it live, and save the grown graph for next time.
+# It picks up exactly where it left off. You never have to be on.
+#
+# One-time setup (repo -> Settings -> Secrets and variables -> Actions):
+#   VERCEL_TOKEN        from vercel.com -> Account Settings -> Tokens -> Create
+#   VERCEL_ORG_ID       from site/.vercel/project.json  ("orgId")     [after your first `vercel` deploy]
+#   VERCEL_PROJECT_ID   from site/.vercel/project.json  ("projectId")
+# Then: Actions tab -> enable workflows -> run "remember" once by hand to test.
+
+name: remember
+
+on:
+  schedule:
+    - cron: "0 */6 * * *"      # every 6 hours (see note at bottom about free minutes)
+  workflow_dispatch: {}         # and whenever you click "Run workflow"
+
+concurrency:
+  group: remember
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  remember:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Restore the graph it has grown so far
+        run: |
+          git fetch origin state 2>/dev/null || true
+          mkdir -p data
+          if git cat-file -e origin/state:lethe.sqlite 2>/dev/null; then
+            git show origin/state:lethe.sqlite > data/lethe.sqlite
+            echo "continuing from the saved graph"
+          else
+            echo "first run --- starting from darkness"
+          fi
+
+      - name: Read the shadows for a while
+        run: python -m lethe.cli run --minutes 12
+
+      - name: Freeze the field
+        run: python -m lethe.cli export site
+
+      - name: Push the field live
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+        run: |
+          npm i -g vercel@latest
+          cd site
+          vercel deploy --prod --yes --token="$VERCEL_TOKEN"
+
+      - name: Save the grown graph for next time
+        run: |
+          tmp="$(mktemp -d)"
+          cp data/lethe.sqlite "$tmp/lethe.sqlite"
+          cd "$tmp"
+          git init -q
+          git config user.name "0lethe"
+          git config user.email "0lethe@users.noreply.github.com"
+          git checkout -q -b state
+          git add lethe.sqlite
+          git commit -q -m "state $(date -u +%FT%TZ)"
+          git push -f "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" state
+
+# Note on free minutes:
+#   Private repos get 2000 free Action-minutes/month. This runs ~15 min, 4x/day
+#   ~= 1800/month --- just under. If you want it running far more often for free,
+#   make the repo PUBLIC (Actions are unlimited on public repos) --- which also
+#   fits the spirit: a thing anyone could stumble onto.
