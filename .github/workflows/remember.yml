@@ -40,8 +40,8 @@ jobs:
         run: |
           git fetch origin state 2>/dev/null || true
           mkdir -p data
-          if git cat-file -e origin/state:lethe.sqlite 2>/dev/null; then
-            git show origin/state:lethe.sqlite > data/lethe.sqlite
+          if git cat-file -e origin/state:lethe.sqlite.gz 2>/dev/null; then
+            git show origin/state:lethe.sqlite.gz | gunzip > data/lethe.sqlite
             echo "continuing from the saved graph"
           else
             echo "first run --- starting from darkness"
@@ -62,13 +62,13 @@ jobs:
       - name: Save the grown graph for next time
         run: |
           tmp="$(mktemp -d)"
-          cp data/lethe.sqlite "$tmp/lethe.sqlite"
+          gzip -c data/lethe.sqlite > "$tmp/lethe.sqlite.gz"
           cd "$tmp"
           git init -q
           git config user.name "0lethe"
           git config user.email "0lethe@users.noreply.github.com"
           git checkout -q -b state
-          git add lethe.sqlite
+          git add lethe.sqlite.gz
           git commit -q -m "state $(date -u +%FT%TZ)"
           git push -f "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" state
 
