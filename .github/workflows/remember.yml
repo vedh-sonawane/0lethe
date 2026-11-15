@@ -75,11 +75,11 @@ jobs:
           deadline=$(( $(date +%s) + 19500 ))    # work ~5.4h, leaving room for a final save
           cycle=0
           while [ "$(date +%s)" -lt "$deadline" ]; do
-            python -m lethe.cli run --minutes 9 || true     # a batch of continuous recovery
+            python -m lethe.cli run --minutes 4 || true     # a short batch of continuous recovery
             python -m lethe.cli export site || true         # freeze the field
             wrangler pages deploy site --project-name=0lethe --branch=main --commit-dirty=true || true
             cycle=$(( cycle + 1 ))
-            if [ $(( cycle % 3 )) -eq 0 ]; then save_state || true; fi   # persist the graph ~every 30 min
+            if [ $(( cycle % 6 )) -eq 0 ]; then save_state || true; fi   # persist the graph ~every 30 min
           done
           save_state || true
 
