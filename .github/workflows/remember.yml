@@ -18,7 +18,7 @@ name: remember
 
 on:
   schedule:
-    - cron: "0 */5 * * *"       # every 5h a fresh job queues; it starts the moment the previous ends -> no gap
+    - cron: "0 * * * *"         # hourly: a fresh job starts within the hour after the previous ends (public repo = free)
   workflow_dispatch: {}
 
 concurrency:
@@ -72,14 +72,23 @@ jobs:
               && git push -f "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" state )
           }
 
+          count () { python -c "import sqlite3;print('  >> ghosts in graph:', sqlite3.connect('data/lethe.sqlite').execute('select count(*) from ghost').fetchone()[0])"; }
+
+          echo "=== can the runner reach the sources? ==="
+          python -c "import urllib.request as u; r=u.urlopen(u.Request('https://en.wikipedia.org/w/api.php?action=query&meta=siteinfo&format=json', headers={'User-Agent':'lethe/0.1'}), timeout=20); print('  wikipedia:', r.status)" || echo "  wikipedia: UNREACHABLE"
+          python -c "import urllib.request as u; r=u.urlopen(u.Request('http://web.archive.org/cdx/search/cdx?url=example.com&limit=1', headers={'User-Agent':'lethe/0.1'}), timeout=25); print('  wayback:', r.status)" || echo "  wayback: UNREACHABLE"
+          echo "=== graph on arrival ==="; count
+
           deadline=$(( $(date +%s) + 19500 ))    # work ~5.4h, leaving room for a final save
           cycle=0
           while [ "$(date +%s)" -lt "$deadline" ]; do
-            python -m lethe.cli run --minutes 4 || true     # a short batch of continuous recovery
-            python -m lethe.cli export site || true         # freeze the field
-            wrangler pages deploy site --project-name=0lethe --branch=main --commit-dirty=true || true
+            echo "----- cycle $cycle -----"
+            python -m lethe.cli run --minutes 4 2>&1 | tail -8   # a batch, with its own words shown
+            count
+            python -m lethe.cli export site >/dev/null 2>&1 || echo "  (export failed)"
+            wrangler pages deploy site --project-name=0lethe --branch=main --commit-dirty=true 2>&1 | tail -2 || echo "  (deploy failed)"
             cycle=$(( cycle + 1 ))
-            if [ $(( cycle % 6 )) -eq 0 ]; then save_state || true; fi   # persist the graph ~every 30 min
+            if [ $(( cycle % 6 )) -eq 0 ]; then save_state && echo "  (state saved)" || echo "  (save failed)"; fi
           done
           save_state || true
 
