@@ -30,7 +30,8 @@ const markById = new Map();
 let tMin = 1994, tMax = 2026, tNow = 2026;      // the year the operator is standing in
 let focusId = null, detail = null, detailAlpha = 0;
 const pointer = { x: -1e4, y: -1e4, down: false, mode: null, mx: 0, my: 0 };
-let hoverId = null;                              // the field breathes in via CSS, not canvas
+let hoverId = null;
+let revealFrames = 0;                            // the field inscribes itself in, mark by mark
 
 // ---- soot texture (drawn once, physical grain) ----------------------------
 let soot = null;
@@ -134,6 +135,11 @@ function scratch(x, y, m, now) {
     const ph = phase(m);
     if (ph.kind === 'unborn') return;
 
+    // inscription: each mark scratches in out of the dark, staggered, once
+    const rvDelay = ((m.id * 2654435761 >>> 0) % 100000) / 100000 * 55;
+    const rv = Math.max(0, Math.min(1, (revealFrames - rvDelay) / 22));
+    if (rv <= 0.001) return;
+
     const atrisk = ph.kind === 'at_risk';
     const preserved = ph.kind === 'preserved';
     const risk = Math.max(0, Math.min(1, m.risk || 0));
@@ -162,6 +168,7 @@ function scratch(x, y, m, now) {
         a = Math.min(1, a + 0.28 * conv);     // heavily-referenced voids burn brighter
     }
     if (hoverId === m.id || focusId === m.id) a = Math.min(1, a + 0.3);
+    a *= rv;                                      // fade in as it inscribes
     const col = strong ? BONE : ASH;
 
     // ghosts tremble --- unfinished, present but incomplete
@@ -363,6 +370,7 @@ function drawCursor() {
 
 // ---- frame ----------------------------------------------------------------
 function frame(now) {
+    revealFrames++;
     // ease the camera toward its target --- the machine flies between connected
     // lost things rather than jumping
     cam.x += (camTarget.x - cam.x) * 0.1;
@@ -376,19 +384,61 @@ function frame(now) {
     ctx.fillStyle = v; ctx.fillRect(0, 0, W, H);
 
     hoverId = null;
+    let hoverBest = 1e9;
     for (const m of marks) {
         const [sx, sy] = toScreen(m.field_x, m.field_y);
         m._sx = sx; m._sy = sy;
         if (sx < -120 || sx > W + 120 || sy < -120 || sy > H + 120) { m._r = -1; continue; }
-        const dx = pointer.x - sx, dy = pointer.y - sy;
-        if (!pointer.down && dx * dx + dy * dy < (26 * DPR) ** 2) hoverId = m.id;
+        if (!pointer.down) {
+            const dx = pointer.x - sx, dy = pointer.y - sy, d2 = dx * dx + dy * dy;
+            if (d2 < (36 * DPR) ** 2 && d2 < hoverBest) { hoverBest = d2; hoverId = m.id; }
+        }
     }
     for (const m of marks) if (m._r !== -1) scratch(m._sx, m._sy, m, now);
 
     drawConstellation(now);
+    drawHoverLabel();
     drawAxis();
     drawCursor();
     requestAnimationFrame(frame);
+}
+
+// the hook: sweep the dark and the name of a lost thing surfaces beside the cursor
+function drawHoverLabel() {
+    if (hoverId == null) return;
+    const m = markById.get(hoverId);
+    if (!m || m._sx == null || m._r === -1) return;
+    const name = (m.label || m.identity || '').trim();
+    if (!name) return;
+    const x = m._sx, y = m._sy, r = 13 * DPR;
+
+    // corner brackets: this mark can be opened
+    ctx.strokeStyle = `rgba(${BONE[0]},${BONE[1]},${BONE[2]},0.5)`; ctx.lineWidth = DPR;
+    for (const [sx, sy] of [[-1, -1], [1, -1], [-1, 1], [1, 1]]) {
+        ctx.beginPath();
+        ctx.moveTo(x + sx * r, y + sy * r - sy * 5 * DPR);
+        ctx.lineTo(x + sx * r, y + sy * r);
+        ctx.lineTo(x + sx * r - sx * 5 * DPR, y + sy * r);
+        ctx.stroke();
+    }
+
+    // the name, whispering out of the soot
+    const text = name.length > 58 ? name.slice(0, 57) + '…' : name;
+    const kind = m.kind === 'text' ? 'a lost writing' : m.kind === 'place' ? 'a lost place'
+               : (m.status === 'at_risk' || m.status === 'preserved') ? 'at risk of being lost'
+               : 'a lost page';
+    const ep = markEpoch(m);
+    const sub = kind + (ep != null ? '   ·   ' + fmtYear(ep) : '');
+    ctx.save();
+    ctx.textAlign = 'left';
+    ctx.shadowColor = 'rgba(6,5,4,0.95)'; ctx.shadowBlur = 11 * DPR;
+    ctx.font = `${13 * DPR}px ${SERIF}`;
+    ctx.fillStyle = `rgba(${BONE[0]},${BONE[1]},${BONE[2]},0.95)`;
+    ctx.fillText(text, x + 18 * DPR, y - 15 * DPR);
+    ctx.font = MONO_S;
+    ctx.fillStyle = `rgba(${ASH[0]},${ASH[1]},${ASH[2]},0.85)`;
+    ctx.fillText(sub, x + 18 * DPR, y - 1 * DPR);
+    ctx.restore();
 }
 
 // ---- input ----------------------------------------------------------------

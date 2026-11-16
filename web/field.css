@@ -16,9 +16,9 @@ html, body {
     display: block;
     width: 100vw;
     height: 100vh;
-    animation: breathe-in 2.8s ease-out both;   /* the world surfacing out of the dark */
+    /* no whole-canvas fade: the marks inscribe themselves one by one out of the
+       dark (see field.js), like the machine remembering as you arrive */
 }
-@keyframes breathe-in { from { opacity: 0; } to { opacity: 1; } }
 
 /* The instrument readout: real selectable text scratched onto the soot.
    No box, no card, no border --- just light where evidence was found. */
