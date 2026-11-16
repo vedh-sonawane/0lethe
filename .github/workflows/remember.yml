@@ -83,7 +83,9 @@ jobs:
           cycle=0
           while [ "$(date +%s)" -lt "$deadline" ]; do
             echo "----- cycle $cycle -----"
-            python -m lethe.cli run --minutes 4 2>&1 | tail -8   # a batch, with its own words shown
+            # hard cap: a batch can NEVER hang the cycle. the engine is resumable,
+            # so a kill is safe --- the next batch picks up from the saved frontier.
+            timeout --signal=INT --kill-after=30 300 python -m lethe.cli run --minutes 4 2>&1 | tail -8 || echo "  (batch capped at 5 min)"
             count
             python -m lethe.cli export site >/dev/null 2>&1 || echo "  (export failed)"
             wrangler pages deploy site --project-name=0lethe --branch=main --commit-dirty=true 2>&1 | tail -2 || echo "  (deploy failed)"

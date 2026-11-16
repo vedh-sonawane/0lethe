@@ -64,7 +64,7 @@ def _sources_pointing_at(conn, void_norm: str, *, max_sources: int = 10) -> list
     return out
 
 
-def reconstruct_void(conn, void_url: str, *, max_sources: int = 10, log=print) -> int | None:
+def reconstruct_void(conn, void_url: str, *, max_sources: int = 6, log=print) -> int | None:
     """Rebuild a lost page from how the surviving web referred to it."""
     nu = _norm(void_url)
     if not nu:

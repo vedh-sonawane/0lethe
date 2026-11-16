@@ -235,14 +235,14 @@ def run(conn, *, max_leads: int | None = None, max_seconds: float | None = None,
         # periodically cross-reference the whole graph: the voids the most sites
         # point at are promoted to the front --- the machine chases its own biggest
         # mysteries, the ghosts it noticed were missing before anyone asked.
-        if worked and worked % 40 == 0:
+        if worked and worked % 120 == 0:
             try:
                 ranked, inbound = convergence(conn, log=quiet)
                 voids = unrecovered_convergent(conn, ranked, inbound, limit=15)
                 rebuilt = promoted = 0
                 for i, (url, n) in enumerate(voids):
                     # rebuild the biggest few directly from inbound testimony
-                    if i < 5 and reconstruct_void(conn, url, log=quiet):
+                    if i < 2 and reconstruct_void(conn, url, log=quiet):
                         rebuilt += 1
                     elif add_lead(conn, "outlink", url, priority=1.0 + min(3.0, n * 0.25),
                                   note=f"convergent void: {n} sites point here"):
