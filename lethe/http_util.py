@@ -32,7 +32,8 @@ CACHE_DIR = DATA_DIR / "cache"
 # Hosts whose public APIs are meant to be queried programmatically. We stay
 # polite (rate-limited) but do not apply robots gating to their API endpoints.
 _API_HOSTS = {"web.archive.org", "archive.org", "en.wikipedia.org", "wikipedia.org",
-              "en.wikisource.org", "wikisource.org"}
+              "en.wikisource.org", "wikisource.org",
+              "commons.wikimedia.org", "www.wikidata.org"}
 
 _last_hit: dict[str, float] = {}
 _MIN_INTERVAL = 0.5  # seconds between requests to the same host

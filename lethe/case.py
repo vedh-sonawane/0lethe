@@ -27,7 +27,7 @@ from .detect import check
 from .extract import extract
 from .fingerprint import hexdigest, simhash, from_hex, hamming, similarity, BITS
 from .reconstruct import assemble
-from .sources import wayback, wikidata, wikipedia, wikiquote, wikisource
+from .sources import commons, wayback, wikidata, wikipedia, wikiquote, wikisource
 
 
 def _field_position(identity: str) -> tuple[float, float]:
@@ -455,6 +455,53 @@ def recognize_fragments(conn, *, limit_ghosts: int = 10, per_ghost: int = 4, log
         conn.execute("UPDATE ghost SET updated_at=datetime('now') WHERE id=?", (g["id"],))
         conn.commit()
     log(f"recognition pass: {total} lost fragment(s) located alive inside surviving works")
+    return total
+
+
+def gather_views(conn, *, limit_ghosts: int = 8, per_ghost: int = 16, log=print) -> int:
+    """VISUAL RECONSTRUCTION, for EVERYTHING --- not just buildings.
+
+    Any lost thing the machine knows by a Wikidata identity (a demolished place, a
+    lost painting, a lost work, a person) left more than one surviving image. This
+    gathers the whole surviving visual record of it from Commons --- every angle,
+    every derivative, every copy that outlived the original --- so the thing can be
+    recomposed from every surviving eye, not shown as a single flat picture. Each
+    view keeps its real date and author; nothing is invented or redrawn."""
+    src = db.register_source(conn, "commons", "Wikimedia Commons", "media", commons.TERMS)
+    ghosts = conn.execute(
+        "SELECT g.id, g.identity, g.label FROM ghost g "
+        "WHERE g.status='reconstructed' AND instr(g.identity, ':Q') > 0 "
+        "AND NOT EXISTS(SELECT 1 FROM reconstruction r JOIN claim c ON c.reconstruction_id=r.id "
+        "              WHERE r.ghost_id=g.id AND c.field='views') "
+        "ORDER BY g.worth DESC, g.updated_at ASC LIMIT ?", (limit_ghosts,)).fetchall()
+    total = 0
+    for g in ghosts:
+        qid = g["identity"].rsplit(":", 1)[-1]
+        if not qid.startswith("Q"):
+            continue
+        views = commons.views_for(qid, limit=per_ghost)
+        if len(views) < 2:                   # one lone photo is not a reconstruction
+            continue
+        recon = conn.execute("SELECT MAX(id) m FROM reconstruction WHERE ghost_id=?",
+                             (g["id"],)).fetchone()["m"]
+        if recon is None:
+            continue
+        payload = json.dumps([{k: v.get(k) for k in ("thumb", "url", "date", "author", "title")}
+                              for v in views], ensure_ascii=False)
+        sid = _record_shadow(conn, g["id"], src, "views",
+                             uri=commons.commons_category(qid), meta={"count": len(views)})
+        cid = int(conn.execute(
+            "INSERT INTO claim(reconstruction_id, field, value, status, confidence, rationale) "
+            "VALUES(?,?,?,?,?,?)",
+            (recon, "views", payload, "recovered", round(min(0.95, 0.5 + 0.03 * len(views)), 3),
+             f"{len(views)} surviving photograph(s) of it, gathered from Commons --- "
+             f"the thing recomposed from every surviving eye")).lastrowid)
+        conn.execute("INSERT OR IGNORE INTO claim_shadow(claim_id, shadow_id) VALUES(?,?)", (cid, sid))
+        conn.execute("UPDATE ghost SET updated_at=datetime('now') WHERE id=?", (g["id"],))
+        conn.commit()
+        total += 1
+        log(f"  «{(g['label'] or '')[:30]}» recomposed from {len(views)} surviving view(s)")
+    log(f"visual reconstruction pass: {total} thing(s) recomposed from their surviving images")
     return total
 
 

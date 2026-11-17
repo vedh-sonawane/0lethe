@@ -115,3 +115,25 @@ html, body {
 }
 @keyframes surface { from { opacity: 0; filter: contrast(0.4) brightness(0.3) blur(3px); }
                        to { opacity: 1; } }
+
+/* the reconstruction trigger: a lost thing recomposed from every surviving eye */
+#readout .r-recompose {
+    margin: 8px 0 2px; cursor: pointer;
+    font: 11px/1.7 "SFMono-Regular","Consolas",ui-monospace,monospace;
+    letter-spacing: .14em; text-transform: uppercase; color: #d7d1c3;
+    transition: color .25s, text-shadow .25s;
+}
+#readout .r-recompose:hover { color: #f6f1e6; text-shadow: 0 0 12px rgba(233,227,213,.5); }
+#readout .r-recompose .n { color: #8a8780; }
+
+/* the reconstruction chamber: surviving images orbiting as plates out of soot.
+   Hand-drawn in canvas (field.js) --- no library, no 3D engine. */
+#chamber {
+    position: fixed; inset: 0; width: 100vw; height: 100vh;
+    display: none; z-index: 30; cursor: grab;
+    background: radial-gradient(ellipse at 50% 46%, rgba(6,5,4,.80) 0%,
+                rgba(6,5,4,.95) 58%, #060504 100%);
+    opacity: 0; transition: opacity .6s ease;
+}
+#chamber.active { display: block; opacity: 1; }
+#chamber.dragging { cursor: grabbing; }

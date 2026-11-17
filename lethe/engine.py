@@ -26,7 +26,7 @@ import time
 from urllib.parse import urlparse
 
 from . import db
-from .case import (foresee_one, recognize_fragments, recover_lost_texts,
+from .case import (foresee_one, gather_views, recognize_fragments, recover_lost_texts,
                    recover_lost_works, recover_structures, run_case)
 from .detect import check
 from .discover import convergence, unrecovered_convergent
@@ -276,6 +276,15 @@ def run(conn, *, max_leads: int | None = None, max_seconds: float | None = None,
                     log(f"  recognition: {found} lost fragment(s) found alive inside surviving works")
             except Exception as e:
                 log(f"  recognition pass skipped: {type(e).__name__}")
+        # periodically recompose things from their full surviving visual record ---
+        # every lost kind with a Wikidata identity, not just structures.
+        if worked and worked % 90 == 0:
+            try:
+                recomposed = gather_views(conn, limit_ghosts=4, per_ghost=16, log=quiet)
+                if recomposed:
+                    log(f"  reconstruction: {recomposed} thing(s) recomposed from surviving images")
+            except Exception as e:
+                log(f"  reconstruction pass skipped: {type(e).__name__}")
         # round-robin guarantees every medium progresses: the two slow crawls get
         # reserved slots, the web fills the rest --- no medium can monopolize.
         lead = None
