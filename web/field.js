@@ -270,7 +270,7 @@ function renderReadout() {
     if (!detail) { readout.innerHTML = ''; readout.classList.remove('shown'); return; }
     const g = detail.ghost, rec = detail.reconstruction;
     const prose = new Set(['body', 'headings', 'outlinks', 'description', 'portrait', 'testimony',
-                           'survives_as', 'what_it_was']);
+                           'survives_as', 'what_it_was', 'survives_inside']);
     const ticks = n => '<span class="bar">' +
         '▓'.repeat(Math.round((n || 0) * 20)) + '<span class="dim">' +
         '░'.repeat(20 - Math.round((n || 0) * 20)) + '</span></span>';

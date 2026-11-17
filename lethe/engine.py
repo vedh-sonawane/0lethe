@@ -26,8 +26,8 @@ import time
 from urllib.parse import urlparse
 
 from . import db
-from .case import (foresee_one, recover_lost_texts, recover_lost_works,
-                   recover_structures, run_case)
+from .case import (foresee_one, recognize_fragments, recover_lost_texts,
+                   recover_lost_works, recover_structures, run_case)
 from .detect import check
 from .discover import convergence, unrecovered_convergent
 from .foresee import fragility
@@ -267,6 +267,15 @@ def run(conn, *, max_leads: int | None = None, max_seconds: float | None = None,
                         f"promoted {promoted} to the front")
             except Exception as e:
                 log(f"  convergence pass skipped: {type(e).__name__}")
+        # periodically read the surviving library: find lost lines still living
+        # verbatim inside surviving books --- the Heraclitus principle, generic.
+        if worked and worked % 70 == 0:
+            try:
+                found = recognize_fragments(conn, limit_ghosts=4, per_ghost=2, log=quiet)
+                if found:
+                    log(f"  recognition: {found} lost fragment(s) found alive inside surviving works")
+            except Exception as e:
+                log(f"  recognition pass skipped: {type(e).__name__}")
         # round-robin guarantees every medium progresses: the two slow crawls get
         # reserved slots, the web fills the rest --- no medium can monopolize.
         lead = None

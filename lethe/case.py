@@ -16,16 +16,18 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
 from dataclasses import dataclass
 from urllib.parse import urlparse
 
 from . import db
 from . import foresee as _foresee
+from . import recognize as _recognize
 from .detect import check
 from .extract import extract
 from .fingerprint import hexdigest, simhash, from_hex, hamming, similarity, BITS
 from .reconstruct import assemble
-from .sources import wayback, wikidata, wikipedia, wikiquote
+from .sources import wayback, wikidata, wikipedia, wikiquote, wikisource
 
 
 def _field_position(identity: str) -> tuple[float, float]:
@@ -384,6 +386,76 @@ def recover_lost_works(conn, *, limit: int = 50, offset: int = 0, log=print):
             log(f"  (skipped {w.name[:30]}: {type(e).__name__})")
     log(f"rebuilt {len(out)} lost work(s) from the Ghost Library")
     return out, len(works)
+
+
+def _fragment_needle(value: str) -> str:
+    """Pull the recognizable line out of a stored fragment claim. The value is
+    'translation\\n— original'; the translation is the searchable English words."""
+    line = value.split("\n—")[0]
+    line = re.sub(r"\[[^\]]*\]", " ", line)          # drop editorial [brackets]
+    line = line.strip().strip('"“”‘’').strip()
+    return re.sub(r"\s+", " ", line)
+
+
+def recognize_fragments(conn, *, limit_ghosts: int = 10, per_ghost: int = 4, log=print) -> int:
+    """CROSS-SHADOW RECOGNITION --- the Shazam of history, run across the graph.
+
+    For lost works whose fragments survive only as quotations, go read the
+    surviving library (Wikisource) and find the exact surviving book, and the
+    exact passage, where each lost line still lives. Records the survival as
+    evidence on the ghost, with the real passage quoted and its source linked.
+    This is the machine proving the principle the whole project rests on: the
+    forgotten survive inside what outlived them."""
+    src_ws = db.register_source(conn, "wikisource", "Wikisource", "source_text", wikisource.TERMS)
+    ghosts = conn.execute(
+        "SELECT g.id, g.label FROM ghost g WHERE g.kind='text' AND EXISTS("
+        "  SELECT 1 FROM reconstruction r JOIN claim c ON c.reconstruction_id=r.id "
+        "  WHERE r.ghost_id=g.id AND c.field='fragment') "
+        "ORDER BY g.updated_at ASC LIMIT ?", (limit_ghosts,)).fetchall()
+    total = 0
+    for g in ghosts:
+        recon = conn.execute("SELECT MAX(id) m FROM reconstruction WHERE ghost_id=?",
+                             (g["id"],)).fetchone()["m"]
+        frags = conn.execute(
+            "SELECT value FROM claim WHERE reconstruction_id=? AND field='fragment' "
+            "ORDER BY confidence DESC LIMIT ?", (recon, per_ghost)).fetchall()
+        for fr in frags:
+            needle = _fragment_needle(fr["value"])
+            if len(needle.split()) < 5 or len(_recognize.distinctive(needle)) < 3:
+                continue                              # too generic to recognize safely
+            found = None
+            for h in wikisource.search(needle, limit=3):
+                loc = _recognize.locate(needle, wikisource.plain_text(h["title"]))
+                if loc:
+                    found = (h["title"], loc)
+                    break
+            if not found:
+                continue
+            title, (sim, overlap, passage) = found
+            value = f"«{title}»\n…{passage}…"
+            if conn.execute("SELECT 1 FROM claim WHERE reconstruction_id=? AND "
+                            "field='survives_inside' AND value=? LIMIT 1", (recon, value)).fetchone():
+                continue                              # already recorded this survival
+            url = wikisource.url_for(title)
+            sid = _record_shadow(conn, g["id"], src_ws, "survival", uri=url,
+                                 meta={"work": title, "similarity": sim, "overlap": overlap})
+            cid = int(conn.execute(
+                "INSERT INTO claim(reconstruction_id, field, value, status, confidence, rationale) "
+                "VALUES(?,?,?,?,?,?)",
+                (recon, "survives_inside", value, "recovered",
+                 round(min(0.95, 0.45 + 0.5 * overlap) * (0.5 + 0.5 * sim), 3),
+                 f"this lost line was located inside the surviving work «{title}» "
+                 f"— {int(round(overlap * 100))}% of its distinctive words present "
+                 f"(signature match {sim})")).lastrowid)
+            conn.execute("INSERT OR IGNORE INTO claim_shadow(claim_id, shadow_id) VALUES(?,?)", (cid, sid))
+            conn.commit()
+            total += 1
+            log(f"  «{(g['label'] or '')[:28]}» survives inside «{title[:40]}» "
+                f"(sim {sim}, overlap {overlap})")
+        conn.execute("UPDATE ghost SET updated_at=datetime('now') WHERE id=?", (g["id"],))
+        conn.commit()
+    log(f"recognition pass: {total} lost fragment(s) located alive inside surviving works")
+    return total
 
 
 def reconstruct_text(conn, author: str, epoch_year: float, *, log=print) -> int | None:
