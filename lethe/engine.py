@@ -40,7 +40,7 @@ PRESERVE_CAP = 40              # polite ceiling on autonomous Save-Page-Now call
 
 SEED_BATCH = 8            # random articles pulled per seeding
 TOPUP_BELOW = 12          # keep the frontier fed above this many pending leads
-CITATIONS_PER_ARTICLE = 24     # keep a single article's liveness sweep bounded in time
+CITATIONS_PER_ARTICLE = 12     # keep a single article's liveness sweep fast so batches never stall
 OUTLINKS_PER_PAGE = 6
 
 
@@ -69,11 +69,14 @@ def _seed_random(conn, n: int = SEED_BATCH, log=print) -> int:
 def seed(conn, log=print) -> None:
     if conn.execute("SELECT COUNT(*) FROM lead WHERE status='pending'").fetchone()[0] == 0:
         _seed_random(conn, SEED_BATCH, log=log)
-    # the two self-paginating media crawls: start them once; each re-enqueues the
-    # next page of itself, so the engine walks through ALL of them over time.
+    # the two self-paginating media crawls. each re-enqueues its own next page, so
+    # a live chain keeps walking. if a chain has run dry (no pending page), restart
+    # it from the top --- so broadened sources are picked up and it never stays stuck.
     for k in ("places", "texts"):
-        if conn.execute("SELECT 1 FROM lead WHERE kind=? LIMIT 1", (k,)).fetchone() is None:
+        if conn.execute("SELECT 1 FROM lead WHERE kind=? AND status='pending' LIMIT 1", (k,)).fetchone() is None:
+            conn.execute("DELETE FROM lead WHERE kind=?", (k,))
             add_lead(conn, k, "0", priority=0.7)
+            log(f"(re)started the {k} crawl")
 
 
 def _next_lead(conn):

@@ -38,7 +38,7 @@ PREFIX schema: <http://schema.org/>
 SELECT ?item ?itemLabel ?itemDescription ?lat ?lon ?inception ?demolished ?image ?article WHERE {
   ?item wdt:P576 ?demolished.
   ?item wdt:P18 ?image.
-  ?item wdt:P31/wdt:P279* wd:Q41176 .
+  ?item wdt:P31/wdt:P279* wd:Q811979 .
   ?item p:P625 ?cs. ?cs psv:P625 ?cn.
   ?cn wikibase:geoLatitude ?lat; wikibase:geoLongitude ?lon.
   ?item rdfs:label ?itemLabel. FILTER(LANG(?itemLabel)="en")
