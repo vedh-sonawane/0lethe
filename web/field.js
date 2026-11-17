@@ -487,7 +487,7 @@ async function focusGhost(id) {
     focusId = id;
     detail = await loadJSON('/api/ghost/' + id, 'ghosts/' + id + '.json');
     renderReadout();
-    if (detail && detail._views && window.openChamber && /(^|&)rc=1(&|$)/.test(location.hash))
+    if (detail && detail._views && window.openChamber && /(^|&)rc=[12](&|$)/.test(location.hash))
         window.openChamber(detail._views, detail.ghost);   // deep-link into a reconstruction
     const m = markById.get(id);        // fly the camera to the thing we just focused
     if (m) { camTarget.x = m.field_x; camTarget.y = m.field_y;

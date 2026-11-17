@@ -19,6 +19,9 @@ const S = {
     az: 0.5, el: 0.12, azV: 0, elV: 0,
     rad: 8.2, targetRad: 8.2, dragging: false, lx: 0, ly: 0, moved: 0,
     t: 0, raf: 0, pid: null,
+    mode: 'orbit', enterIdx: -1,            // 'orbit' | 'enter' (standing inside one eye)
+    eye: [0, 0, 9], target: [0, 0, 0],      // eased camera, so entering a photo is a flight
+    px: -1e4, py: -1e4,                      // last pointer, device px, for picking
 };
 
 // ---- minimal column-major mat4 (no gl-matrix) -----------------------------
@@ -97,6 +100,21 @@ void main(){
   gl_FragColor = vec4(col, uAlpha * (1.0 - fog*0.35));   // back plates stay ghostly
 }`;
 
+// a second tiny program for 3D lines in world space: the ground grid, and any
+// scratched structure. white scratch fading into soot with distance.
+const VERT_L = `
+attribute vec3 aP; uniform mat4 uVP; varying float vZ;
+void main(){ gl_Position = uVP * vec4(aP, 1.0); vZ = gl_Position.w; }`;
+const FRAG_L = `
+precision mediump float;
+uniform float uAlpha; uniform float uFogN; uniform float uFogF; uniform vec3 uCol;
+varying float vZ;
+void main(){
+  float fog = clamp((vZ - uFogN) / (uFogF - uFogN), 0.0, 1.0);
+  gl_FragColor = vec4(mix(uCol, vec3(0.024,0.02,0.016), fog), uAlpha * (1.0 - fog));
+}`;
+let lprog = null, lloc = {};
+
 function compile(type, src) {
     const s = gl.createShader(type);
     gl.shaderSource(s, src); gl.compileShader(s);
@@ -125,6 +143,15 @@ function initGL() {
     idxBuf = gl.createBuffer();
     gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, idxBuf);
     gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array([0, 1, 2, 2, 3, 0]), gl.STATIC_DRAW);
+    // the 3D line program (ground grid, structure)
+    lprog = gl.createProgram();
+    gl.attachShader(lprog, compile(gl.VERTEX_SHADER, VERT_L));
+    gl.attachShader(lprog, compile(gl.FRAGMENT_SHADER, FRAG_L));
+    gl.linkProgram(lprog);
+    for (const u of ['uVP', 'uAlpha', 'uFogN', 'uFogF', 'uCol'])
+        lloc[u] = gl.getUniformLocation(lprog, u);
+    lloc.aP = gl.getAttribLocation(lprog, 'aP');
+    buildGrid();
     gl.enable(gl.BLEND);
     gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
     ready = true;
@@ -171,6 +198,44 @@ function loadTex(view) {
     return tex;
 }
 
+// when you step into an eye, pull the FULL-resolution surviving photograph ---
+// not a thumbnail. you are then looking at the actual thing, through the actual
+// lens that saw it: no model, no reconstruction, the real bytes.
+function loadFull(view) {
+    if (view.fullReq || !view.url) return;
+    view.fullReq = true;
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    img.onload = () => {
+        const tex = gl.createTexture();
+        gl.bindTexture(gl.TEXTURE_2D, tex);
+        gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+        try {
+            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, img);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+            view.fullTex = tex; view.aspect = img.naturalWidth / img.naturalHeight || view.aspect;
+        } catch (e) { /* keep the thumb */ }
+    };
+    img.src = view.url;
+}
+
+// a soot ground and a horizon: so the thing stands in a place, not a void. a
+// faint scratched grid, fading into the dark --- an instrument's floor.
+let gridBuf = null, gridN = 0;
+function buildGrid() {
+    const v = [], R = 26, step = 2, y = -3.2;
+    for (let i = -R; i <= R; i += step) {
+        v.push(-R, y, i, R, y, i, i, y, -R, i, y, R);   // 2 lines per i (x-run, z-run)
+    }
+    gridN = v.length / 3;
+    gridBuf = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, gridBuf);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(v), gl.STATIC_DRAW);
+}
+
 // fibonacci sphere: scatter the views through a true 3D volume around the thing
 function placeViews() {
     const n = S.views.length, R = 4.2, GOLD = Math.PI * (1 + Math.sqrt(5));
@@ -201,13 +266,15 @@ function openChamber(viewsData, ghost) {
     const span = ys.length ? (Math.min(...ys) + (ys.length > 1 ? '–' + Math.max(...ys) : '')) : '';
     S.sub = `${S.views.length} surviving eyes${span ? '   ·   ' + span : ''}`;
     S.az = 0.5; S.el = 0.12; S.rad = 9.5; S.targetRad = 7; S.t = 0;
+    S.mode = 'orbit'; S.enterIdx = -1;
+    S.eye = [9.5 * Math.cos(0.5), 1.1, 9.5 * Math.sin(0.5)]; S.target = [0, 0, 0]; S.up = [0, 1, 0];
     S.active = true;
     cv.classList.add('active'); hud.classList.add('active');
-    hud.innerHTML = `<div class="ch-title">${escapeHTML(S.title)}</div>` +
-        `<div class="ch-sub">${escapeHTML(S.sub)}</div>` +
-        `<div class="ch-hint">drag to orbit&nbsp;&nbsp;·&nbsp;&nbsp;scroll to fly in&nbsp;&nbsp;·&nbsp;&nbsp;esc to close</div>`;
+    updateHud();
     cancelAnimationFrame(S.raf);
     S.raf = requestAnimationFrame(frame);
+    if (/(^|&)rc=2(&|$)/.test(location.hash))        // dev: deep-link inside one eye
+        setTimeout(() => { if (S.active) enterView(0); }, 300);
 }
 function closeChamber() {
     S.active = false;
@@ -219,26 +286,68 @@ function escapeHTML(s) {
         ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 }
 
+const lerp3 = (a, b, k) => [a[0] + (b[0] - a[0]) * k, a[1] + (b[1] - a[1]) * k, a[2] + (b[2] - a[2]) * k];
+
 function frame() {
     if (!S.active) return;
     S.t += 0.016;
-    if (!S.dragging) { S.az += 0.0013; S.az += S.azV; S.azV *= 0.93; S.elV *= 0.93; S.el += S.elV; }
-    S.el = Math.max(-1.2, Math.min(1.2, S.el));
-    S.rad += (S.targetRad - S.rad) * 0.08;
-
     const asp = cv.width / cv.height;
-    const proj = perspective(55 * Math.PI / 180, asp, 0.1, 80);
-    const ce = Math.cos(S.el), se = Math.sin(S.el);
-    const eye = [S.rad * ce * Math.cos(S.az), S.rad * se, S.rad * ce * Math.sin(S.az)];
-    const view = lookAt(eye, [0, 0, 0], [0, 1, 0]);
+    const proj = perspective(52 * Math.PI / 180, asp, 0.05, 90);
+
+    // where the camera WANTS to be: orbiting the whole thing, or standing right
+    // in front of one surviving eye, square-on and close enough that the real
+    // photograph fills the whole view --- you are inside it.
+    let wantEye, wantTarget, wantUp = [0, 1, 0];
+    const fovy = 52 * Math.PI / 180;
+    if (S.mode === 'enter' && S.enterIdx >= 0) {
+        const v = S.views[S.enterIdx];
+        const n = norm(v.pos);
+        let right = cross([0, 1, 0], n);
+        if (Math.hypot(right[0], right[1], right[2]) < 1e-4) right = [1, 0, 0];
+        right = norm(right);
+        const up = cross(n, right);
+        const h = 1.9, w = h * (v.aspect || 1.4);
+        const distH = (h / 2) / Math.tan(fovy / 2);
+        const fovx = 2 * Math.atan(Math.tan(fovy / 2) * asp);
+        const distW = (w / 2) / Math.tan(fovx / 2);
+        const dist = Math.min(distH, distW) * 0.98;      // cover the frame
+        wantEye = [v.pos[0] + n[0] * dist, v.pos[1] + n[1] * dist, v.pos[2] + n[2] * dist];
+        wantTarget = v.pos;
+        wantUp = up;                                      // photo stands upright
+    } else {
+        if (!S.dragging) { S.az += 0.0013; S.az += S.azV; S.azV *= 0.93; S.elV *= 0.93; S.el += S.elV; }
+        S.el = Math.max(-1.2, Math.min(1.2, S.el));
+        S.rad += (S.targetRad - S.rad) * 0.08;
+        const ce = Math.cos(S.el), se = Math.sin(S.el);
+        wantEye = [S.rad * ce * Math.cos(S.az), S.rad * se, S.rad * ce * Math.sin(S.az)];
+        wantTarget = [0, 0, 0];
+    }
+    const k = S.mode === 'enter' ? 0.1 : 0.16;
+    S.eye = lerp3(S.eye, wantEye, k);
+    S.target = lerp3(S.target, wantTarget, k);
+    S.up = norm(lerp3(S.up || [0, 1, 0], wantUp, k));
+    const view = lookAt(S.eye, S.target, S.up);
     const vp = mul(proj, view);
+    S.vp = vp;
 
     gl.viewport(0, 0, cv.width, cv.height);
     gl.clearColor(0.024, 0.020, 0.016, 1);
     gl.clear(gl.COLOR_BUFFER_BIT);
+
+    // the ground grid --- a place to stand
+    gl.useProgram(lprog);
+    gl.uniformMatrix4fv(lloc.uVP, false, vp);
+    gl.uniform1f(lloc.uFogN, 6.0); gl.uniform1f(lloc.uFogF, 34.0);
+    gl.uniform1f(lloc.uAlpha, S.mode === 'enter' ? 0.05 : 0.18);
+    gl.uniform3f(lloc.uCol, 0.42, 0.40, 0.36);
+    gl.bindBuffer(gl.ARRAY_BUFFER, gridBuf);
+    gl.enableVertexAttribArray(lloc.aP);
+    gl.vertexAttribPointer(lloc.aP, 3, gl.FLOAT, false, 0, 0);
+    gl.drawArrays(gl.LINES, 0, gridN);
+
     gl.useProgram(prog);
     gl.uniform1f(loc.uFogN, 3.0);            // the cloud stays legible; depth only dims
-    gl.uniform1f(loc.uFogF, 18.0);
+    gl.uniform1f(loc.uFogF, 20.0);
 
     gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf);
     gl.enableVertexAttribArray(loc.aPos);
@@ -251,29 +360,74 @@ function frame() {
 
     // sort back-to-front for correct blending
     const ord = S.views.map((v, i) => {
-        const dz = sub(v.pos, eye);
+        const dz = sub(v.pos, S.eye);
         return { i, d: dot(dz, dz) };
     }).sort((a, b) => b.d - a.d);
 
     for (const o of ord) {
         const v = S.views[o.i];
-        const rv = Math.max(0, Math.min(1, (S.t * 9 - v.reveal * 0.6)));   // inscribe through time
+        const entered = S.mode === 'enter' && o.i === S.enterIdx;
+        const rv = entered ? 1 : Math.max(0, Math.min(1, (S.t * 9 - v.reveal * 0.6)));
         if (rv <= 0) continue;
         const h = 1.9, w = h * (v.aspect || 1.4);
         const model = planeModel(v.pos, w, h);
         gl.uniformMatrix4fv(loc.uMVP, false, mul(vp, model));
         gl.uniformMatrix4fv(loc.uMV, false, mul(view, model));
-        // photo
-        gl.bindTexture(gl.TEXTURE_2D, v.ready ? v.tex : sootTex);
+        // photo --- full resolution once you've stepped into it
+        const tex = entered && v.fullTex ? v.fullTex : (v.ready ? v.tex : sootTex);
+        gl.bindTexture(gl.TEXTURE_2D, tex);
         gl.uniform1f(loc.uMode, 0);
         gl.uniform1f(loc.uAlpha, 0.96 * rv);
         gl.drawElements(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0);
         // scratched frame
         gl.uniform1f(loc.uMode, 1);
-        gl.uniform1f(loc.uAlpha, 0.5 * rv);
+        gl.uniform1f(loc.uAlpha, (entered ? 0.8 : 0.5) * rv);
         gl.drawArrays(gl.LINE_LOOP, 0, 4);
     }
     S.raf = requestAnimationFrame(frame);
+}
+
+// ---- stepping into an eye -------------------------------------------------
+function project(p) {
+    const vp = S.vp; if (!vp) return null;
+    const x = vp[0] * p[0] + vp[4] * p[1] + vp[8] * p[2] + vp[12];
+    const y = vp[1] * p[0] + vp[5] * p[1] + vp[9] * p[2] + vp[13];
+    const w = vp[3] * p[0] + vp[7] * p[1] + vp[11] * p[2] + vp[15];
+    if (w <= 0) return null;
+    return [(x / w * 0.5 + 0.5) * cv.width, (1 - (y / w * 0.5 + 0.5)) * cv.height];
+}
+function pick(sx, sy) {
+    let best = -1, bestD = 1e9;
+    const thr = Math.min(cv.width, cv.height) * 0.16;
+    for (let i = 0; i < S.views.length; i++) {
+        const c = project(S.views[i].pos); if (!c) continue;
+        const d = Math.hypot(c[0] - sx, c[1] - sy);
+        if (d < thr && d < bestD) { bestD = d; best = i; }
+    }
+    return best;
+}
+function enterView(i) {
+    S.mode = 'enter'; S.enterIdx = i;
+    loadFull(S.views[i]);
+    updateHud();
+}
+function exitView() { S.mode = 'orbit'; S.enterIdx = -1; updateHud(); }
+
+function updateHud() {
+    if (S.mode === 'enter' && S.enterIdx >= 0) {
+        const v = S.views[S.enterIdx];
+        const parts = [v.y != null ? v.y : null, (v.author || '').replace(/\s*\(.*$/, '') || null]
+            .filter(Boolean).join('   ·   ');
+        hud.innerHTML = `<div class="ch-title">${escapeHTML(S.title)}</div>` +
+            `<div class="ch-sub">${escapeHTML(parts || 'a surviving eye')}</div>` +
+            `<div class="ch-hint">you are inside one surviving photograph` +
+            `&nbsp;&nbsp;·&nbsp;&nbsp;click to step back&nbsp;&nbsp;·&nbsp;&nbsp;esc to close</div>`;
+    } else {
+        hud.innerHTML = `<div class="ch-title">${escapeHTML(S.title)}</div>` +
+            `<div class="ch-sub">${escapeHTML(S.sub)}</div>` +
+            `<div class="ch-hint">drag to orbit&nbsp;&nbsp;·&nbsp;&nbsp;scroll to fly in` +
+            `&nbsp;&nbsp;·&nbsp;&nbsp;click an eye to step inside&nbsp;&nbsp;·&nbsp;&nbsp;esc to close</div>`;
+    }
 }
 
 // ---- interaction ----------------------------------------------------------
@@ -289,13 +443,22 @@ cv.addEventListener('pointermove', e => {
 });
 cv.addEventListener('pointerup', e => {
     S.dragging = false; cv.classList.remove('dragging');
-    if (S.moved < 6) closeChamber();            // a click, not a drag: leave
+    if (S.moved >= 6) return;                    // a drag, not a click
+    const dpr = cv.width / innerWidth;
+    const idx = pick(e.clientX * dpr, e.clientY * dpr);
+    if (idx >= 0) enterView(idx);                // step inside a surviving eye
+    else if (S.mode === 'enter') exitView();     // click away: step back out
+    else closeChamber();                         // click the void: leave
 });
 cv.addEventListener('wheel', e => {
     e.preventDefault();
-    S.targetRad = Math.max(1.2, Math.min(16, S.targetRad + e.deltaY * 0.004));
+    if (S.mode === 'enter') { exitView(); return; }     // pull back out of the photograph
+    S.targetRad = Math.max(1.4, Math.min(16, S.targetRad + e.deltaY * 0.004));
 }, { passive: false });
-addEventListener('keydown', e => { if (e.key === 'Escape' && S.active) closeChamber(); });
+addEventListener('keydown', e => {
+    if (!S.active || e.key !== 'Escape') return;
+    if (S.mode === 'enter') exitView(); else closeChamber();
+});
 addEventListener('resize', () => { if (S.active) resize(); });
 
 window.openChamber = openChamber;
