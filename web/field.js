@@ -263,7 +263,9 @@ const esc = s => ('' + (s == null ? '' : s)).replace(/[&<>"]/g, c =>
 // follow a connection: clicking a linked thing focuses it and flies there
 readout.addEventListener('click', e => {
     const rc = e.target.closest('[data-recompose]');
-    if (rc && detail && detail._views) { openChamber(detail._views, detail.ghost); return; }
+    if (rc && detail && detail._views && window.openChamber) {
+        window.openChamber(detail._views, detail.ghost); return;
+    }
     const row = e.target.closest('[data-ghost]');
     if (row) focusGhost(parseInt(row.dataset.ghost, 10));
 });
@@ -485,8 +487,8 @@ async function focusGhost(id) {
     focusId = id;
     detail = await loadJSON('/api/ghost/' + id, 'ghosts/' + id + '.json');
     renderReadout();
-    if (detail && detail._views && /(^|&)rc=1(&|$)/.test(location.hash))
-        openChamber(detail._views, detail.ghost);   // deep-link straight into a reconstruction
+    if (detail && detail._views && window.openChamber && /(^|&)rc=1(&|$)/.test(location.hash))
+        window.openChamber(detail._views, detail.ghost);   // deep-link into a reconstruction
     const m = markById.get(id);        // fly the camera to the thing we just focused
     if (m) { camTarget.x = m.field_x; camTarget.y = m.field_y;
              camTarget.scale = Math.max(cam.scale, 2.0); }
@@ -552,196 +554,3 @@ async function wake() {
     requestAnimationFrame(frame);
 }
 wake();
-
-// ===========================================================================
-// THE RECONSTRUCTION CHAMBER
-// A lost thing recomposed from every surviving eye. Its surviving photographs
-// orbit as plates scratched out of the soot --- drag to turn the thing in the
-// dark. Hand-drawn in 2D canvas: no library, no 3D engine, every mark deliberate.
-// ===========================================================================
-const chamber = document.getElementById('chamber');
-const cx = chamber.getContext('2d');
-let CW = 0, CH_ = 0;
-const CH = { active: false, views: [], angle: 0, target: 0, dragging: false,
-             lastX: 0, moved: 0, raf: 0, t: 0, title: '' };
-
-function chamberResize() {
-    CW = Math.floor(innerWidth * DPR); CH_ = Math.floor(innerHeight * DPR);
-    chamber.width = CW; chamber.height = CH_;
-    chamber.style.width = innerWidth + 'px'; chamber.style.height = innerHeight + 'px';
-}
-addEventListener('resize', () => { if (CH.active) chamberResize(); });
-
-function openChamber(viewsData, ghost) {
-    chamberResize();
-    CH.views = viewsData.map((v, i) => {
-        const o = { ...v, img: null, loaded: false };
-        if (v.thumb) {
-            const im = new Image();
-            im.onload = () => { o.loaded = true; };
-            im.onerror = () => { o.loaded = false; o.dead = true; };
-            im.src = v.thumb;
-            o.img = im;
-        }
-        return o;
-    });
-    CH.title = (ghost && (ghost.label || ghost.identity)) || '';
-    CH.angle = CH.target = 0; CH.active = true; CH.t = 0;
-    chamber.classList.add('active');
-    cancelAnimationFrame(CH.raf);
-    CH.raf = requestAnimationFrame(chamberFrame);
-}
-
-function closeChamber() {
-    CH.active = false;
-    chamber.classList.remove('active', 'dragging');
-    cancelAnimationFrame(CH.raf);
-}
-
-function chJitter(i) {
-    // a fixed per-plate scatter: breaks the ring into pinned negatives
-    const h = Math.sin(i * 12.9898) * 43758.5453;
-    const a = h - Math.floor(h);
-    const b = (Math.sin(i * 78.233) * 12543.123) % 1;
-    const c = (Math.sin(i * 3.17) * 823.11) % 1;
-    return { y: a - 0.5, r: b, s: c, rot: (a - 0.5) * 0.22 };
-}
-
-function chTremble(i, strength) {
-    // a faint, deterministic shiver per plate --- present but incomplete
-    const s = Math.sin(CH.t * 0.9 + i * 2.3), c = Math.cos(CH.t * 0.7 + i * 1.7);
-    return { x: s * strength, y: c * strength * 0.6 };
-}
-
-function chamberFrame() {
-    if (!CH.active) return;
-    CH.t += 0.016;
-    if (!CH.dragging) CH.target += 0.0016;          // slow idle drift
-    CH.angle += (CH.target - CH.angle) * 0.12;
-
-    cx.clearRect(0, 0, CW, CH_);
-    const n = CH.views.length;
-    const cxp = CW / 2, cyp = CH_ * 0.46;
-    const radius = Math.min(CW * 0.33, CH_ * 0.52);
-    const plateH = Math.min(CH_ * 0.40, CW * 0.34);
-
-    // order back-to-front by depth so nearer plates occlude farther ones. each
-    // plate is scattered off the ring by a fixed per-index jitter, so the thing
-    // reads as negatives pinned in the dark --- never a neat carousel band.
-    const order = CH.views.map((v, i) => {
-        const a = (i / n) * Math.PI * 2 + CH.angle;
-        return { i, a, depth: Math.cos(a) };
-    }).sort((p, q) => p.depth - q.depth);
-
-    const front = order[order.length - 1];
-    for (const o of order) {
-        const v = CH.views[o.i];
-        const d = o.depth;                          // -1 back .. 1 front
-        const t = d * 0.5 + 0.5;                    // 0..1
-        const isFront = o.i === front.i;
-        const j = chJitter(o.i);
-        const scale = (0.5 + 0.6 * t) * (0.86 + 0.28 * j.s);
-        const tr = chTremble(o.i, (1 - t) * 8 * DPR);
-        const x = cxp + Math.sin(o.a) * radius * (0.82 + 0.3 * j.r) + tr.x;
-        const y = cyp + j.y * CH_ * 0.26 * (1.1 - t) - d * 8 * DPR + tr.y;
-        const alpha = 0.08 + 0.92 * Math.pow(t, 1.7);
-
-        let w, hgt;
-        if (v.loaded && v.img && v.img.naturalWidth) {
-            hgt = plateH * scale;
-            w = hgt * (v.img.naturalWidth / v.img.naturalHeight);
-            const maxW = CW * 0.40 * scale;
-            if (w > maxW) { w = maxW; hgt = w * (v.img.naturalHeight / v.img.naturalWidth); }
-        } else {
-            w = plateH * scale * 0.72; hgt = plateH * scale;   // a plate still developing
-        }
-
-        cx.save();
-        cx.globalAlpha = alpha;
-        cx.translate(x, y);
-        cx.rotate(j.rot * (1 - t * 0.7));           // a faint scattered tilt, settling at front
-        // a soot bed behind each plate
-        cx.fillStyle = '#0a0908';
-        cx.fillRect(-w / 2 - 3 * DPR, -hgt / 2 - 3 * DPR, w + 6 * DPR, hgt + 6 * DPR);
-        if (v.loaded && v.img) {
-            // real recovered reality: the forward plate develops into full colour,
-            // the rest sink back into soot --- light only where the eye is closest.
-            cx.globalAlpha = alpha * (0.5 + 0.5 * t);
-            cx.filter = isFront ? 'contrast(1.06) saturate(1.02)'
-                      : `saturate(${(0.15 + 0.5 * t).toFixed(2)}) ` +
-                        `brightness(${(0.45 + 0.4 * t).toFixed(2)}) contrast(1.04) sepia(.18)`;
-            try { cx.drawImage(v.img, -w / 2, -hgt / 2, w, hgt); } catch (_) {}
-            cx.filter = 'none';
-            if (!isFront) {                          // veil the receding plates deeper in soot
-                cx.globalAlpha = (1 - t) * 0.55;
-                cx.fillStyle = '#060504';
-                cx.fillRect(-w / 2, -hgt / 2, w, hgt);
-            }
-        } else {
-            cx.globalAlpha = alpha * 0.5;
-            cx.fillStyle = '#120f0c';
-            cx.fillRect(-w / 2, -hgt / 2, w, hgt);
-        }
-        // scratched border --- the plate traced out of soot, white on black
-        cx.globalAlpha = alpha;
-        cx.strokeStyle = isFront ? 'rgba(242,237,225,.9)' : 'rgba(170,164,150,.32)';
-        cx.lineWidth = (isFront ? 1.4 : 0.8) * DPR;
-        cx.strokeRect(-w / 2, -hgt / 2, w, hgt);
-        if (isFront) {                              // two scratch ticks at the corners
-            cx.strokeStyle = 'rgba(242,237,225,.55)';
-            cx.beginPath();
-            cx.moveTo(-w / 2 - 6 * DPR, -hgt / 2); cx.lineTo(-w / 2, -hgt / 2);
-            cx.moveTo(w / 2, hgt / 2); cx.lineTo(w / 2 + 6 * DPR, hgt / 2);
-            cx.stroke();
-        }
-        cx.restore();
-    }
-
-    // the forward plate names itself: the year it was seen, by whom
-    const fv = CH.views[front.i];
-    cx.save();
-    cx.textAlign = 'center';
-    const year = chYear(fv && fv.date);
-    cx.globalAlpha = 0.92;
-    cx.fillStyle = '#f2ede1';
-    cx.font = `${22 * DPR}px "Iowan Old Style","Palatino Linotype","Georgia",serif`;
-    cx.fillText(CH.title.slice(0, 54), cxp, CH_ * 0.86);
-    cx.fillStyle = '#9c9789';
-    cx.font = `${12 * DPR}px "SFMono-Regular","Consolas",ui-monospace,monospace`;
-    const sub = [year, chAuthor(fv && fv.author)].filter(Boolean).join('   ·   ');
-    if (sub) cx.fillText(sub, cxp, CH_ * 0.86 + 24 * DPR);
-    cx.globalAlpha = 0.5;
-    cx.fillStyle = '#6b675d';
-    cx.fillText(`recomposed from ${n} surviving eyes   ·   drag to turn   ·   esc to close`,
-                cxp, CH_ * 0.955);
-    cx.restore();
-
-    CH.raf = requestAnimationFrame(chamberFrame);
-}
-
-function chYear(date) {
-    if (!date) return '';
-    const m = ('' + date).match(/(\d{3,4})/);
-    return m ? m[1] : '';
-}
-function chAuthor(a) {
-    if (!a) return '';
-    return ('' + a).replace(/\s*\(.*$/, '').slice(0, 40);
-}
-
-chamber.addEventListener('pointerdown', e => {
-    CH.dragging = true; CH.moved = 0; CH.lastX = e.clientX;
-    chamber.classList.add('dragging'); chamber.setPointerCapture(e.pointerId);
-});
-chamber.addEventListener('pointermove', e => {
-    if (!CH.dragging) return;
-    const dx = e.clientX - CH.lastX; CH.lastX = e.clientX;
-    CH.moved += Math.abs(dx); CH.target += dx * 0.007;
-});
-chamber.addEventListener('pointerup', e => {
-    CH.dragging = false; chamber.classList.remove('dragging');
-    if (CH.moved < 6) closeChamber();               // a click, not a drag: leave the chamber
-});
-chamber.addEventListener('wheel', e => { e.preventDefault(); CH.target += e.deltaY * 0.0022; },
-                          { passive: false });
-addEventListener('keydown', e => { if (e.key === 'Escape' && CH.active) closeChamber(); });

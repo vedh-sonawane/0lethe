@@ -22,7 +22,7 @@ from . import api, db
 
 ROOT = Path(__file__).resolve().parent.parent
 WEB = ROOT / "web"
-_FRONT = ("index.html", "field.css", "field.js")
+_FRONT = ("index.html", "field.css", "field.js", "chamber.js")
 
 _DEPLOY = """This folder IS the field --- a static copy, no server needed.
 
