@@ -66,6 +66,65 @@ ORDER BY DESC(?death)
 LIMIT %d OFFSET %d
 """
 
+# THE GHOST LIBRARY: works humanity knows existed and no longer has --- lost
+# books, poems, operas, paintings. The holes in the record, catalogued by
+# Wikidata as 'lost work' (Q21752591). Each is a ghost to be rebuilt from the
+# surviving traces: its description, its author, and what others wrote about it.
+_LOST_WORKS_QUERY = """
+PREFIX wdt: <http://www.wikidata.org/prop/direct/>
+PREFIX wd: <http://www.wikidata.org/entity/>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+PREFIX schema: <http://schema.org/>
+SELECT ?item ?name ?authorName ?authorDeath ?desc ?inception ?article ?image WHERE {
+  ?item wdt:P31/wdt:P279* wd:Q21752591 .
+  ?item rdfs:label ?name. FILTER(LANG(?name)="en")
+  OPTIONAL { ?item wdt:P50 ?a. ?a rdfs:label ?authorName. FILTER(LANG(?authorName)="en")
+             OPTIONAL { ?a wdt:P570 ?authorDeath. } }
+  OPTIONAL { ?item schema:description ?desc. FILTER(LANG(?desc)="en") }
+  OPTIONAL { ?item wdt:P571 ?inception. }
+  OPTIONAL { ?article schema:about ?item; schema:isPartOf <https://en.wikipedia.org/>. }
+  OPTIONAL { ?item wdt:P18 ?image. }
+}
+ORDER BY ?item
+LIMIT %d OFFSET %d
+"""
+
+
+@dataclass
+class LostWork:
+    qid: str
+    name: str
+    author: str | None
+    author_death: str | None
+    description: str | None
+    inception: str | None
+    article: str | None          # the surviving Wikipedia account of the lost thing
+    image: str | None            # a surviving depiction/derivative, if any
+
+
+def lost_works(limit: int = 60, offset: int = 0, *, log=print) -> list[LostWork]:
+    """A page of the things humanity knows it lost --- the Ghost Library."""
+    data = _run(_LOST_WORKS_QUERY % (limit, offset), log=log)
+    if not data:
+        return []
+    out, seen = [], set()
+    for r in data.get("results", {}).get("bindings", []):
+        qid = r.get("item", {}).get("value", "").rsplit("/", 1)[-1]
+        name = r.get("name", {}).get("value")
+        if not qid or not name or qid in seen:
+            continue
+        seen.add(qid)
+        out.append(LostWork(
+            qid=qid, name=name,
+            author=r.get("authorName", {}).get("value"),
+            author_death=r.get("authorDeath", {}).get("value"),
+            description=r.get("desc", {}).get("value"),
+            inception=r.get("inception", {}).get("value"),
+            article=r.get("article", {}).get("value"),
+            image=r.get("image", {}).get("value"),
+        ))
+    return out
+
 
 @dataclass
 class Place:

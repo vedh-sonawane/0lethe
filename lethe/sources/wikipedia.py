@@ -147,6 +147,26 @@ def external_links(article: str, *, limit: int = 500) -> list[Citation]:
     return cite_templates(article, limit=limit)
 
 
+def article_extract(title_or_url: str, *, chars: int = 1500) -> str:
+    """The plain-text account a surviving encyclopedia keeps of something ---
+    for a lost work, this IS the testimony: what others recorded about it."""
+    from urllib.parse import unquote
+    title = title_or_url
+    if title.startswith("http"):
+        title = unquote(title.rstrip("/").rsplit("/", 1)[-1]).replace("_", " ")
+    params = {"action": "query", "prop": "extracts", "titles": title,
+              "explaintext": "1", "exchars": str(chars), "exsectionformat": "plain",
+              "format": "json", "formatversion": "2", "redirects": "1"}
+    res = fetch(f"{API}?{urlencode(params)}", respect_robots=False)
+    if not res.ok:
+        return ""
+    try:
+        pages = __import__("json").loads(res.text).get("query", {}).get("pages", [])
+        return (pages[0].get("extract", "") if pages else "").strip()
+    except Exception:
+        return ""
+
+
 def random_articles(n: int = 10) -> list[str]:
     """Random article titles from across ALL of human knowledge. This is how the
     machine seeds itself without anyone naming a topic: every article cites the

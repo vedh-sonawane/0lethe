@@ -26,7 +26,8 @@ import time
 from urllib.parse import urlparse
 
 from . import db
-from .case import foresee_one, recover_lost_texts, recover_structures, run_case
+from .case import (foresee_one, recover_lost_texts, recover_lost_works,
+                   recover_structures, run_case)
 from .detect import check
 from .discover import convergence, unrecovered_convergent
 from .foresee import fragility
@@ -35,6 +36,7 @@ from .sources import wikipedia
 
 PLACES_PER_PAGE = 40
 TEXTS_PER_PAGE = 12
+WORKS_PER_PAGE = 20            # a page of the Ghost Library: lost books, operas, paintings
 FORESEE_PER_ARTICLE = 3        # how many living citations to assess for fragility
 PRESERVE_CAP = 40              # polite ceiling on autonomous Save-Page-Now calls per run
 
@@ -72,7 +74,7 @@ def seed(conn, log=print) -> None:
     # the two self-paginating media crawls. each re-enqueues its own next page, so
     # a live chain keeps walking. if a chain has run dry (no pending page), restart
     # it from the top --- so broadened sources are picked up and it never stays stuck.
-    for k in ("places", "texts"):
+    for k in ("places", "texts", "works"):
         if conn.execute("SELECT 1 FROM lead WHERE kind=? AND status='pending' LIMIT 1", (k,)).fetchone() is None:
             conn.execute("DELETE FROM lead WHERE kind=?", (k,))
             add_lead(conn, k, "0", priority=0.7)
@@ -195,6 +197,16 @@ def work_lead(conn, lead, log=print, ctx=None) -> None:
                 add_lead(conn, "texts", str(offset + TEXTS_PER_PAGE), priority=0.66)
             log(f"[texts] +{len(gids)} lost works rebuilt (offset {offset}, {people} authors)")
 
+        elif kind == "works":
+            # a page of the Ghost Library: works humanity knows it lost. keep
+            # paginating through the whole class while it still returns works.
+            offset = int(target) if target.isdigit() else 0
+            gids, works = recover_lost_works(conn, limit=WORKS_PER_PAGE, offset=offset, log=quiet)
+            if works > 0:
+                add_lead(conn, "works", str(offset + WORKS_PER_PAGE), priority=0.64)
+            log(f"[works] +{len(gids)} lost works rebuilt from the Ghost Library "
+                f"(offset {offset}, {works} catalogued)")
+
         else:
             log(f"[?] unknown lead kind {kind}")
 
@@ -262,6 +274,8 @@ def run(conn, *, max_leads: int | None = None, max_seconds: float | None = None,
             lead = _pending_of(conn, "places")
         elif worked % 6 == 3:
             lead = _pending_of(conn, "texts")
+        elif worked % 8 == 5:
+            lead = _pending_of(conn, "works")
         if lead is None:
             lead = _next_lead(conn)
         if lead is None:

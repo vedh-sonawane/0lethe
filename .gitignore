@@ -22,3 +22,6 @@ Thumbs.db
 # secrets --- never commit
 .env
 *.env
+
+# local wrangler cache
+/.wrangler/

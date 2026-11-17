@@ -109,7 +109,7 @@ function phase(m) {
     if (m.status === 'at_risk' || m.status === 'preserved') return { kind: m.status, p: 1 };
     const e = markEpoch(m);
     if (e == null) return { kind: m.status === 'reconstructed' ? 'gone' : 'ghost', p: 1 };
-    if (m.kind === 'text') {                  // a lost ancient work: its era, then gone
+    if (m.kind === 'text' || m.kind === 'lost_work') {   // a work: its era, then lost
         if (tNow < e - 60) return { kind: 'unborn', p: 0 };
         if (tNow <= e + 120) return { kind: 'alive', p: 1 };
         return { kind: 'gone', p: 1 };
@@ -269,7 +269,8 @@ readout.addEventListener('click', e => {
 function renderReadout() {
     if (!detail) { readout.innerHTML = ''; readout.classList.remove('shown'); return; }
     const g = detail.ghost, rec = detail.reconstruction;
-    const prose = new Set(['body', 'headings', 'outlinks', 'description', 'portrait', 'testimony']);
+    const prose = new Set(['body', 'headings', 'outlinks', 'description', 'portrait', 'testimony',
+                           'survives_as', 'what_it_was']);
     const ticks = n => '<span class="bar">' +
         '▓'.repeat(Math.round((n || 0) * 20)) + '<span class="dim">' +
         '░'.repeat(20 - Math.round((n || 0) * 20)) + '</span></span>';
@@ -308,7 +309,8 @@ function renderReadout() {
             }
             h += `</div>`;
         } else if (c.value) {
-            const lim = c.field === 'portrait' ? 1800 : (prose.has(c.field) ? 700 : 100000);
+            const lim = (c.field === 'portrait' || c.field === 'survives_as') ? 1800
+                      : (prose.has(c.field) ? 700 : 100000);
             const v = esc(c.value).slice(0, lim);
             h += `<div class="r-val ${prose.has(c.field) ? 'prose' : ''} ${c.field === 'portrait' ? 'r-portrait' : ''}">${v}</div>`;
         }
@@ -425,6 +427,7 @@ function drawHoverLabel() {
     // the name, whispering out of the soot
     const text = name.length > 58 ? name.slice(0, 57) + '…' : name;
     const kind = m.kind === 'text' ? 'a lost writing' : m.kind === 'place' ? 'a lost place'
+               : m.kind === 'lost_work' ? 'a lost work'
                : (m.status === 'at_risk' || m.status === 'preserved') ? 'at risk of being lost'
                : 'a lost page';
     const ep = markEpoch(m);

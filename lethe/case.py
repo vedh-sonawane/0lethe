@@ -273,6 +273,119 @@ def hunt_geocities(conn, neighborhoods: list[str] | None = None, *, per: int = 8
     return results
 
 
+def _era_from_account(text: str):
+    """Read an era out of the surviving account itself --- a year or century it
+    names. Evidence, not invention: the date comes from the record, and is
+    labelled inferred. Returns (year, how) or (None, None)."""
+    import re
+    if not text:
+        return None, None
+    # explicit centuries, incl. BC --- e.g. "5th century BC", "15th century"
+    best = None
+    for m in re.finditer(r"\b(\d{1,2})(?:st|nd|rd|th)\s+century(\s+BCE?|\s+BC)?", text, re.I):
+        n = int(m.group(1))
+        y = (n - 1) * 100 + 50
+        if m.group(2):          # BC/BCE
+            y = -y
+        if best is None or abs(y) > 0:  # prefer the first named century
+            best = y
+            return best, f"the {m.group(1)} century it is placed in"
+    # a concrete year, 1000..2026 --- take the earliest named (usually its making)
+    yrs = [int(y) for y in re.findall(r"\b(1[0-9]{3}|20[0-2][0-9])\b", text)]
+    yrs = [y for y in yrs if 1000 <= y <= 2026]
+    if yrs:
+        y = min(yrs)
+        return float(y), f"the year {y} named in the surviving account"
+    return None, None
+
+
+def reconstruct_lost_work(conn, w, *, log=print) -> int | None:
+    """THE GHOST LIBRARY: rebuild a work humanity lost --- a book, poem, opera,
+    painting known to have existed and gone --- from the traces that survived it:
+    what it was, who made it, and the account others kept of it. Creates knowledge
+    the world had filed under 'lost'."""
+    src_wd = db.register_source(conn, "wikidata", "Wikidata + Wikimedia Commons",
+                                "structured", wikidata.TERMS)
+    src_wp = db.register_source(conn, "wikipedia", "Wikipedia", "encyclopedia", wikipedia.TERMS)
+    gid = _upsert_ghost(conn, f"work:{w.qid}")
+
+    # the surviving account of the lost thing --- its testimony
+    account = wikipedia.article_extract(w.article) if w.article else ""
+    inc_y = wikidata._year(w.inception)
+    death_y = wikidata._year(w.author_death)
+    epoch = inc_y if inc_y is not None else death_y
+    # last resort: let the surviving account place it in time (inferred, sourced)
+    inferred_era = None
+    if epoch is None:
+        epoch, inferred_era = _era_from_account(account)
+
+    wd_sid = _record_shadow(conn, gid, src_wd, "record",
+                            uri=w.article or f"https://www.wikidata.org/wiki/{w.qid}",
+                            meta={"qid": w.qid})
+    recon_id = int(conn.execute(
+        "INSERT INTO reconstruction(ghost_id, method, confidence, summary) VALUES(?,?,?,?)",
+        (gid, "lost_work.v1", 0.75,
+         f"A lost work, reassembled from what survived of it: {w.description or 'a work known to be lost'}."
+         )).lastrowid)
+
+    def _claim(field, value, conf, rationale, sid=wd_sid):
+        if not value:
+            return
+        cid = int(conn.execute(
+            "INSERT INTO claim(reconstruction_id, field, value, status, confidence, rationale) "
+            "VALUES(?,?,?,?,?,?)", (recon_id, field, value, "recovered", conf, rationale)).lastrowid)
+        conn.execute("INSERT OR IGNORE INTO claim_shadow(claim_id, shadow_id) VALUES(?,?)", (cid, sid))
+
+    _claim("what_it_was", w.description, 0.9, "the record's own description of the lost work")
+    _claim("authored_by", w.author, 0.9, "its creator, per the record")
+    if inc_y is not None:
+        _claim("created", w.inception[:10] if w.inception else str(inc_y), 0.85, "when it was made")
+    elif w.author_death:
+        _claim("era", f"around the time of its author (d. {w.author_death[:10]})", 0.6,
+               "dated from its author's lifetime")
+    elif inferred_era:
+        cid = int(conn.execute(
+            "INSERT INTO claim(reconstruction_id, field, value, status, confidence, rationale) "
+            "VALUES(?,?,?,?,?,?)", (recon_id, "era", f"dated from {inferred_era}", "inferred", 0.4,
+            "no recorded date; placed in time by the surviving account")).lastrowid)
+        conn.execute("INSERT OR IGNORE INTO claim_shadow(claim_id, shadow_id) VALUES(?,?)", (cid, wd_sid))
+    if account:
+        wp_sid = _record_shadow(conn, gid, src_wp, "account", uri=w.article)
+        cid = int(conn.execute(
+            "INSERT INTO claim(reconstruction_id, field, value, status, confidence, rationale) "
+            "VALUES(?,?,?,?,?,?)", (recon_id, "survives_as", account[:1600], "recovered", 0.7,
+            "what the surviving record still tells of it --- the shadow it cast")).lastrowid)
+        conn.execute("INSERT OR IGNORE INTO claim_shadow(claim_id, shadow_id) VALUES(?,?)", (cid, wp_sid))
+    if w.image:
+        img = w.image + ("&" if "?" in w.image else "?") + "width=480"
+        _claim("images", img, 0.7, "a surviving depiction or derivative of the lost work")
+
+    worth = round(0.5 + 0.1 * (bool(w.description) + bool(account) + bool(w.author) + bool(w.image)), 3)
+    conn.execute(
+        "UPDATE ghost SET kind='lost_work', status='reconstructed', label=?, worth=?, "
+        "epoch_year=?, existed_from=?, updated_at=datetime('now') WHERE id=?",
+        (w.name, worth, epoch, w.inception, gid))
+    conn.commit()
+    log(f"  rebuilt lost work: \"{w.name[:46]}\"" + (f"  (by {w.author})" if w.author else ""))
+    return gid
+
+
+def recover_lost_works(conn, *, limit: int = 50, offset: int = 0, log=print):
+    """Walk the Ghost Library --- the catalogue of things humanity lost --- and
+    rebuild each from its surviving shadows."""
+    works = wikidata.lost_works(limit, offset, log=log)
+    out = []
+    for w in works:
+        try:
+            gid = reconstruct_lost_work(conn, w, log=log)
+            if gid:
+                out.append(gid)
+        except Exception as e:
+            log(f"  (skipped {w.name[:30]}: {type(e).__name__})")
+    log(f"rebuilt {len(out)} lost work(s) from the Ghost Library")
+    return out, len(works)
+
+
 def reconstruct_text(conn, author: str, epoch_year: float, *, log=print) -> int | None:
     """Second medium: a LOST TEXT, rebuilt from the fragments that survive quoted
     inside other people's books. The Heraclitus case --- the whole principle, run

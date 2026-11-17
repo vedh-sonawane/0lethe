@@ -22,7 +22,8 @@ import sys
 
 from . import db
 from .case import (discover_from_wikipedia, foresee_wikipedia, hunt_geocities,
-                   recover_lost_texts, recover_structures, reconstruct_text, run_case)
+                   recover_lost_texts, recover_lost_works, recover_structures,
+                   reconstruct_text, run_case)
 
 _STATUS_MARK = {"recovered": "+", "inferred": "~", "missing": "-"}
 
@@ -113,6 +114,8 @@ def main(argv: list[str]) -> int:
             foresee_wikipedia(conn, " ".join(argv[2:]))
         elif cmd == "places":
             recover_structures(conn, limit=int(argv[2]) if len(argv) >= 3 else 400)
+        elif cmd == "library":
+            recover_lost_works(conn, limit=int(argv[2]) if len(argv) >= 3 else 60)
         elif cmd == "text":
             if len(argv) >= 4 and argv[3].lstrip("-").isdigit():
                 reconstruct_text(conn, argv[2], float(argv[3]))
