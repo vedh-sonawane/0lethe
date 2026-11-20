@@ -223,13 +223,14 @@ function loadFull(view) {
     img.src = view.url;
 }
 
-// a soot ground and a horizon: so the thing stands in a place, not a void. a
-// faint scratched grid, fading into the dark --- an instrument's floor.
+// the ground you walk on: a scratched grid at eye-zero, running out to a soot
+// horizon --- the real floor of the place, an instrument's deck.
+const EYE = 1.7;                                 // human eye height, ~metres
 let gridBuf = null, gridN = 0;
 function buildGrid() {
-    const v = [], R = 26, step = 2, y = -3.2;
+    const v = [], R = 70, step = 4, y = 0;
     for (let i = -R; i <= R; i += step) {
-        v.push(-R, y, i, R, y, i, i, y, -R, i, y, R);   // 2 lines per i (x-run, z-run)
+        v.push(-R, y, i, R, y, i, i, y, -R, i, y, R);
     }
     gridN = v.length / 3;
     gridBuf = gl.createBuffer();
@@ -237,18 +238,31 @@ function buildGrid() {
     gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(v), gl.STATIC_DRAW);
 }
 
-// fibonacci sphere: scatter the views through a true 3D volume around the thing
+// an upright panel standing on the ground, facing a direction. a real-scale
+// surface of the place --- a surviving photograph, where the thing was seen.
+function uprightModel(c, w, h, face) {
+    const s = Math.sin(face), co = Math.cos(face);
+    return [co * w, 0, -s * w, 0,   0, h, 0, 0,   s, 0, co, 0,   c[0], c[1], c[2], 1];
+}
+
+// lay the surviving views across the real ground as upright, real-scale panels,
+// spiralling out from where the thing stood, all facing inward --- so you walk in
+// among them and the place half-stands around you. Everything between is soot.
 function placeViews() {
-    const n = S.views.length, R = 4.2, GOLD = Math.PI * (1 + Math.sqrt(5));
+    const n = S.views.length, GOLD = Math.PI * (1 + Math.sqrt(5));
     S.views.forEach((v, i) => {
-        const k = i + 0.5;
-        const phi = Math.acos(1 - 2 * k / n);
-        const th = GOLD * k;
-        const sp = Math.sin(phi);
-        v.pos = [R * sp * Math.cos(th), R * Math.cos(phi) * 0.82, R * sp * Math.sin(th)];
-        v.tex = loadTex(v);
         v.aspect = v.aspect || 1.4;
-        v.reveal = i;                         // inscribed in order of date (sorted below)
+        const h = 8.5;                            // ~8.5m tall, real building scale
+        const w = h * v.aspect;
+        const k = i + 0.5;
+        const rad = 6 + Math.sqrt(k / n) * 26;    // a street spiralling outward
+        const ang = GOLD * k;
+        const cx = Math.cos(ang) * rad, cz = Math.sin(ang) * rad;
+        v.w = w; v.h = h;
+        v.pos = [cx, h / 2, cz];                  // bottom edge on the ground
+        v.face = Math.atan2(-cx, -cz);            // faces back toward where it stood
+        v.tex = loadTex(v);
+        v.reveal = i;
     });
 }
 
@@ -267,8 +281,9 @@ function openChamber(viewsData, ghost) {
     const span = ys.length ? (Math.min(...ys) + (ys.length > 1 ? '–' + Math.max(...ys) : '')) : '';
     S.sub = `${S.views.length} surviving eyes${span ? '   ·   ' + span : ''}`;
     S.t = 0; S.enterIdx = -1; S.tgt = null; S.keys = Object.create(null); S.vel = [0, 0, 0];
-    // start outside the cloud, looking into it, ready to fly in
-    S.pos = [0, 1.2, 13]; S.yaw = Math.PI; S.pitch = -0.06; S.eye = S.pos;
+    // stand at the near edge of the place, at human height, looking in toward
+    // where the thing was, head tipped up to the standing views
+    S.pos = [0, EYE, 42]; S.yaw = Math.PI; S.pitch = 0.08; S.eye = S.pos;
     S.active = true; window.__chamberActive = true;
     cv.classList.add('active'); hud.classList.add('active');
     updateHud();
@@ -298,31 +313,31 @@ function frame() {
     if (!S.active) return;
     S.t += 0.016;
     const asp = cv.width / cv.height;
-    const fovy = 60 * Math.PI / 180;
-    const proj = perspective(fovy, asp, 0.03, 140);
+    const fovy = 62 * Math.PI / 180;
+    const proj = perspective(fovy, asp, 0.03, 240);
 
-    const fwd = lookDir();
-    const right = norm(cross(fwd, [0, 1, 0]));
+    // walk on the ground: heading is yaw only, so looking up never lifts you off
+    // your feet. you travel the place; you don't fly over it.
+    const fwdH = [Math.sin(S.yaw), 0, Math.cos(S.yaw)];
+    const rightH = [Math.cos(S.yaw), 0, -Math.sin(S.yaw)];
 
     if (S.tgt) {
-        // gliding toward an eye you clicked, until you take the stick back
-        S.pos = lerp3(S.pos, S.tgt.pos, 0.09);
+        // walking up to a view you clicked, until you take the controls back
+        S.pos = lerp3(S.pos, S.tgt.pos, 0.08);
         let dy = ((S.tgt.yaw - S.yaw + Math.PI * 3) % (Math.PI * 2)) - Math.PI;
-        S.yaw += dy * 0.12; S.pitch += (S.tgt.pitch - S.pitch) * 0.12;
+        S.yaw += dy * 0.1; S.pitch += (S.tgt.pitch - S.pitch) * 0.1;
         const d = Math.hypot(S.pos[0] - S.tgt.pos[0], S.pos[1] - S.tgt.pos[1], S.pos[2] - S.tgt.pos[2]);
-        if (d < 0.04) S.tgt = null;
+        if (d < 0.05) S.tgt = null;
     } else {
-        // FREE FLIGHT: move where you look. W/S fwd-back, A/D strafe, space/shift lift
-        const a = 0.085, k = S.keys, acc = [0, 0, 0];
-        const add = (v, s) => { acc[0] += v[0] * s; acc[1] += v[1] * s; acc[2] += v[2] * s; };
-        if (k['w'] || k['arrowup']) add(fwd, a);
-        if (k['s'] || k['arrowdown']) add(fwd, -a);
-        if (k['d'] || k['arrowright']) add(right, a);
-        if (k['a'] || k['arrowleft']) add(right, -a);
-        if (k[' '] || k['e']) acc[1] += a;
-        if (k['shift'] || k['q'] || k['c']) acc[1] -= a;
-        S.vel = [(S.vel[0] + acc[0]) * 0.84, (S.vel[1] + acc[1]) * 0.84, (S.vel[2] + acc[2]) * 0.84];
-        S.pos = [S.pos[0] + S.vel[0], S.pos[1] + S.vel[1], S.pos[2] + S.vel[2]];
+        const a = 0.09, k = S.keys, acc = [0, 0, 0];
+        const add = (v, s) => { acc[0] += v[0] * s; acc[2] += v[2] * s; };
+        if (k['w'] || k['arrowup']) add(fwdH, a);
+        if (k['s'] || k['arrowdown']) add(fwdH, -a);
+        if (k['d'] || k['arrowright']) add(rightH, a);
+        if (k['a'] || k['arrowleft']) add(rightH, -a);
+        S.vel = [(S.vel[0] + acc[0]) * 0.82, 0, (S.vel[2] + acc[2]) * 0.82];
+        S.pos = [S.pos[0] + S.vel[0], S.pos[1], S.pos[2] + S.vel[2]];
+        S.pos[1] += (EYE - S.pos[1]) * 0.1;        // settle back to standing height
     }
     S.eye = S.pos;
     const f2 = lookDir();
@@ -337,8 +352,8 @@ function frame() {
     // the ground grid --- a place to stand
     gl.useProgram(lprog);
     gl.uniformMatrix4fv(lloc.uVP, false, vp);
-    gl.uniform1f(lloc.uFogN, 6.0); gl.uniform1f(lloc.uFogF, 40.0);
-    gl.uniform1f(lloc.uAlpha, 0.16);
+    gl.uniform1f(lloc.uFogN, 10.0); gl.uniform1f(lloc.uFogF, 95.0);
+    gl.uniform1f(lloc.uAlpha, 0.15);
     gl.uniform3f(lloc.uCol, 0.42, 0.40, 0.36);
     gl.bindBuffer(gl.ARRAY_BUFFER, gridBuf);
     gl.enableVertexAttribArray(lloc.aP);
@@ -346,8 +361,8 @@ function frame() {
     gl.drawArrays(gl.LINES, 0, gridN);
 
     gl.useProgram(prog);
-    gl.uniform1f(loc.uFogN, 3.0);            // the cloud stays legible; depth only dims
-    gl.uniform1f(loc.uFogF, 20.0);
+    gl.uniform1f(loc.uFogN, 8.0);            // nearer views are sharp; far ones sink to soot
+    gl.uniform1f(loc.uFogF, 72.0);
 
     gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf);
     gl.enableVertexAttribArray(loc.aPos);
@@ -369,8 +384,7 @@ function frame() {
         const entered = o.i === S.enterIdx;
         const rv = entered ? 1 : Math.max(0, Math.min(1, (S.t * 9 - v.reveal * 0.6)));
         if (rv <= 0) continue;
-        const h = 1.9, w = h * (v.aspect || 1.4);
-        const model = planeModel(v.pos, w, h);
+        const model = uprightModel(v.pos, v.w, v.h, v.face);
         gl.uniformMatrix4fv(loc.uMVP, false, mul(vp, model));
         gl.uniformMatrix4fv(loc.uMV, false, mul(view, model));
         // photo --- full resolution once you've stepped into it
@@ -410,16 +424,17 @@ function pick(sx, sy) {
 // resolution --- you fly to it and it becomes the real thing filling your view.
 function flyToView(i) {
     const v = S.views[i];
-    const n = norm(v.pos);
-    const h = 1.9, w = h * (v.aspect || 1.4);
-    const fovy = 60 * Math.PI / 180, asp = cv.width / cv.height;
-    const distH = (h / 2) / Math.tan(fovy / 2);
-    const distW = (w / 2) / Math.tan(2 * Math.atan(Math.tan(fovy / 2) * asp) / 2);
-    const dist = Math.min(distH, distW) * 1.02;
-    const eye = [v.pos[0] + n[0] * dist, v.pos[1] + n[1] * dist, v.pos[2] + n[2] * dist];
-    // look back toward the photo (opposite the outward normal)
-    const yaw = Math.atan2(-n[0], -n[2]), pitch = Math.asin(Math.max(-1, Math.min(1, -n[1])));
-    S.tgt = { pos: eye, yaw, pitch };
+    // the panel faces (sin face, 0, cos face); stand out in front of it on the
+    // ground, far enough back that it fills the view, and look up at it.
+    const nx = Math.sin(v.face), nz = Math.cos(v.face);
+    const fovy = 62 * Math.PI / 180, asp = cv.width / cv.height;
+    const distH = (v.h / 2) / Math.tan(fovy / 2);
+    const distW = (v.w / 2) / Math.tan(2 * Math.atan(Math.tan(fovy / 2) * asp) / 2);
+    const dist = Math.max(6, Math.min(distH, distW) * 1.1);
+    const pos = [v.pos[0] + nx * dist, EYE, v.pos[2] + nz * dist];
+    const yaw = Math.atan2(-nx, -nz);                 // face the panel
+    const pitch = Math.atan2(v.h / 2 - EYE, dist);    // tip head up to its middle
+    S.tgt = { pos, yaw, pitch };
     S.enterIdx = i; loadFull(v); updateHud();
 }
 
@@ -429,9 +444,8 @@ function updateHud() {
         .filter(Boolean).join('   ·   ') : S.sub;
     hud.innerHTML = `<div class="ch-title">${escapeHTML(S.title)}</div>` +
         `<div class="ch-sub">${escapeHTML(line || S.sub)}</div>` +
-        `<div class="ch-hint">W A S D · space / shift to fly` +
-        `&nbsp;&nbsp;·&nbsp;&nbsp;drag to look&nbsp;&nbsp;·&nbsp;&nbsp;click an eye to approach` +
-        `&nbsp;&nbsp;·&nbsp;&nbsp;esc to leave</div>`;
+        `<div class="ch-hint">W A S D to walk&nbsp;&nbsp;·&nbsp;&nbsp;drag to look` +
+        `&nbsp;&nbsp;·&nbsp;&nbsp;click a view to walk up to it&nbsp;&nbsp;·&nbsp;&nbsp;esc to leave</div>`;
 }
 
 // ---- interaction: fly and look --------------------------------------------
@@ -455,10 +469,10 @@ cv.addEventListener('pointerup', e => {
     else { S.enterIdx = -1; updateHud(); }          // click the void: deselect
 });
 cv.addEventListener('wheel', e => {
-    e.preventDefault();                             // scroll = thrust along your gaze
+    e.preventDefault();                             // scroll = stride forward/back
     S.tgt = null;
-    const f = lookDir(), s = -e.deltaY * 0.006;
-    S.vel = [S.vel[0] + f[0] * s, S.vel[1] + f[1] * s, S.vel[2] + f[2] * s];
+    const s = -e.deltaY * 0.01;
+    S.vel = [S.vel[0] + Math.sin(S.yaw) * s, 0, S.vel[2] + Math.cos(S.yaw) * s];
 }, { passive: false });
 addEventListener('keydown', e => {
     if (!S.active) return;
