@@ -40,23 +40,22 @@ const crs = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0
 function nrm(v) { const l = Math.hypot(v[0], v[1], v[2]) || 1; return [v[0] / l, v[1] / l, v[2] / l]; }
 
 // ---- shaders --------------------------------------------------------------
-const V_WORLD = `attribute vec3 aPos; attribute vec3 aNrm; attribute vec2 aUV;
-uniform mat4 uVP; varying vec3 vN; varying float vZ; varying vec2 vUV;
-void main(){ gl_Position = uVP*vec4(aPos,1.0); vN=aNrm; vZ=gl_Position.w; vUV=aUV; }`;
+const V_WORLD = `attribute vec3 aPos; attribute vec3 aNrm; attribute vec2 aUV; attribute vec3 aCol;
+uniform mat4 uVP; varying vec3 vN; varying float vZ; varying vec2 vUV; varying vec3 vCol;
+void main(){ gl_Position = uVP*vec4(aPos,1.0); vN=aNrm; vZ=gl_Position.w; vUV=aUV; vCol=aCol; }`;
 const F_WORLD = `precision mediump float;
-uniform vec3 uSun; uniform vec3 uBase; uniform float uFogN,uFogF; uniform float uTextured;
-uniform sampler2D uTex;
-varying vec3 vN; varying float vZ; varying vec2 vUV;
+uniform vec3 uSun; uniform float uFogN,uFogF; uniform float uTextured; uniform sampler2D uTex;
+varying vec3 vN; varying float vZ; varying vec2 vUV; varying vec3 vCol;
 const vec3 haze=vec3(0.44,0.42,0.39);
 void main(){
   vec3 n=normalize(vN);
   float l=max(dot(n,uSun),0.0);
   float sky=clamp(n.y*0.5+0.5,0.0,1.0);
-  float lum = 0.34 + 1.15*l + 0.26*sky;                    // strong sun: lit vs shadowed sides read
+  float lum = 0.30 + 1.25*l + 0.25*sky;                    // strong sun: lit vs shadowed sides read
   vec3 col;
-  if(uTextured>0.5 && vUV.x>=0.0){ col=texture2D(uTex,vUV).rgb*lum; }   // facade: windows + wall
-  else if(uTextured>0.5){ col=vec3(0.17,0.16,0.14)*lum; }              // roof
-  else { col=uBase*lum; }                                               // ground base
+  if(uTextured>0.5 && vUV.x>=0.0){ col=texture2D(uTex,vUV).rgb*vCol*lum*1.7; }  // tinted façade
+  else if(uTextured>0.5){ col=vCol*0.42*lum; }                                  // roof (darker tint)
+  else { col=vCol*lum; }                                                         // ground
   float fog=clamp((vZ-uFogN)/(uFogF-uFogN),0.0,1.0);
   gl_FragColor=vec4(mix(col,haze,fog),1.0);
 }`;
@@ -130,9 +129,9 @@ function initGL() {
     gl = cv.getContext('webgl', { alpha: true, antialias: true, depth: true });
     if (!gl) return false;
     wloc.p = program(V_WORLD, F_WORLD);
-    for (const u of ['uVP', 'uSun', 'uBase', 'uFogN', 'uFogF', 'uTextured', 'uTex']) wloc[u] = gl.getUniformLocation(wloc.p, u);
+    for (const u of ['uVP', 'uSun', 'uFogN', 'uFogF', 'uTextured', 'uTex']) wloc[u] = gl.getUniformLocation(wloc.p, u);
     wloc.aPos = gl.getAttribLocation(wloc.p, 'aPos'); wloc.aNrm = gl.getAttribLocation(wloc.p, 'aNrm');
-    wloc.aUV = gl.getAttribLocation(wloc.p, 'aUV');
+    wloc.aUV = gl.getAttribLocation(wloc.p, 'aUV'); wloc.aCol = gl.getAttribLocation(wloc.p, 'aCol');
     facadeTex = makeFacade();
     lprog = program(V_LINE, F_LINE);
     for (const u of ['uVP', 'uFogN', 'uFogF', 'uAlpha', 'uCol']) lloc[u] = gl.getUniformLocation(lprog, u);
@@ -176,52 +175,56 @@ function resize() {
 function buf(arr) { const b = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, b);
     gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(arr), gl.STATIC_DRAW); return b; }
 
-function extrude(poly, h, V) {       // walls (windowed) + a centroid-fan roof, pos+nrm+uv
-    const n = poly.length, floors = Math.max(1, h / 3.3);
+function extrude(poly, h, V, col) {  // walls (windowed) + roof, pos+nrm+uv+col (11 floats)
+    const n = poly.length, floors = Math.max(1, h / 3.3), r = col[0], g = col[1], bl = col[2];
     let cx = 0, cz = 0; for (const p of poly) { cx += p[0]; cz += p[1]; } cx /= n; cz /= n;
     for (let i = 0; i < n; i++) {
         const a = poly[i], b = poly[(i + 1) % n];
         const ex = b[0] - a[0], ez = b[1] - a[1];
         const len = Math.hypot(ex, ez) || 1;
         let nx = ez / len, nz = -ex / len;
-        const bays = Math.max(1, Math.round(len / 4));         // ~4m per window bay
-        // wall quad a0-b0-bH-aH, uv tiles by bays across and floors up
+        const bays = Math.max(1, Math.round(len / 4));
         const w = [[a[0], 0, a[1], 0, 0], [b[0], 0, b[1], bays, 0],
                    [b[0], h, b[1], bays, floors], [a[0], h, a[1], 0, floors]];
         for (const t of [[0, 1, 2], [0, 2, 3]]) for (const k of t) {
-            V.push(w[k][0], w[k][1], w[k][2], nx, 0, nz, w[k][3], w[k][4]);
+            V.push(w[k][0], w[k][1], w[k][2], nx, 0, nz, w[k][3], w[k][4], r, g, bl);
         }
-        // roof triangle (uv.x=-1 marks it as roof, not façade)
-        V.push(cx, h, cz, 0, 1, 0, -1, -1, a[0], h, a[1], 0, 1, 0, -1, -1, b[0], h, b[1], 0, 1, 0, -1, -1);
+        V.push(cx, h, cz, 0, 1, 0, -1, -1, r, g, bl, a[0], h, a[1], 0, 1, 0, -1, -1, r, g, bl,
+               b[0], h, b[1], 0, 1, 0, -1, -1, r, g, bl);
     }
 }
 
+const PAL = [[0.86, 0.78, 0.64], [0.78, 0.74, 0.67], [0.7, 0.62, 0.53], [0.83, 0.8, 0.73],
+             [0.72, 0.66, 0.62], [0.88, 0.82, 0.71], [0.64, 0.6, 0.56], [0.8, 0.7, 0.58]];
+
 function buildWorld(w) {
     S.foot = []; S.meCentroid = [0, 0]; S.meH = 10; ghost = null;
-    // ground: a big plane out to the horizon, beneath the imagery
     const R = Math.max((w.radius || 320) * 1.6, 4000);
-    ground = buf([-R, 0, -R, 0, 1, 0, -1, -1, R, 0, -R, 0, 1, 0, -1, -1, R, 0, R, 0, 1, 0, -1, -1,
-                  -R, 0, -R, 0, 1, 0, -1, -1, R, 0, R, 0, 1, 0, -1, -1, -R, 0, R, 0, 1, 0, -1, -1]);
-    // solid buildings (everything but the lost thing) merged into one mesh
-    const V = [];
-    const edges = [];                            // the lost building, as a wireframe ghost
-    for (const b of (w.buildings || [])) {
+    const gc = [0.30, 0.29, 0.25];               // ground base colour (mostly hidden by imagery)
+    const gv = (x, z) => [x, 0, z, 0, 1, 0, -1, -1, gc[0], gc[1], gc[2]];
+    ground = buf([].concat(gv(-R, -R), gv(R, -R), gv(R, R), gv(-R, -R), gv(R, R), gv(-R, R)));
+    const V = [], edges = [];
+    let sx = 0, sz = 0, nc = 0;                   // accumulate city centre of mass
+    w.buildings && w.buildings.forEach((b, i) => {
         const h = b.h > 0 ? b.h : 8.5;
         if (b.me) {
-            for (let i = 0; i < b.p.length; i++) {
-                const a = b.p[i], c = b.p[(i + 1) % b.p.length];
-                edges.push(a[0], 0, a[1], a[0], h, a[1]);        // vertical
-                edges.push(a[0], h, a[1], c[0], h, c[1]);        // roofline
-                edges.push(a[0], 0, a[1], c[0], 0, c[1]);        // base
+            for (let j = 0; j < b.p.length; j++) {
+                const a = b.p[j], c = b.p[(j + 1) % b.p.length];
+                edges.push(a[0], 0, a[1], a[0], h, a[1]);
+                edges.push(a[0], h, a[1], c[0], h, c[1]);
+                edges.push(a[0], 0, a[1], c[0], 0, c[1]);
             }
             S.meCentroid = b.p.reduce((s, p) => [s[0] + p[0], s[1] + p[1]], [0, 0]).map(x => x / b.p.length);
             S.meH = h;
         } else {
-            extrude(b.p, h, V);
+            const ct = b.p.reduce((s, p) => [s[0] + p[0], s[1] + p[1]], [0, 0]).map(x => x / b.p.length);
+            sx += ct[0]; sz += ct[1]; nc++;
+            extrude(b.p, h, V, PAL[(i * 2654435761 >>> 0) % PAL.length]);
             S.foot.push(b.p);
         }
-    }
-    bld = { b: buf(V), n: V.length / 8 };
+    });
+    S.cityC = nc ? [sx / nc, sz / nc] : (S.meCentroid || [0, 0]);
+    bld = { b: buf(V), n: V.length / 11 };
     ghost = edges.length ? { b: buf(edges), n: edges.length / 3 } : null;
     // roads as faint ground lines
     const L = [];
@@ -300,10 +303,10 @@ function openChamber(payload, ghostRec) {
     S.title = (ghostRec && (ghostRec.label || ghostRec.identity)) || '';
     const nb = (world.buildings || []).length;
     S.sub = `standing where it stood · ${nb} real buildings · real aerial ground`;
-    const c = S.meCentroid || [0, 0];
-    // arrive low over the city, looking across it, then settle to the street to walk
-    S.pos = [c[0], 52, c[1] + 105]; S.yaw = Math.PI; S.pitch = -0.33; S.vy = 0; S.t = 0;
-    if (/(^|&)rc=3(&|$)/.test(location.hash)) { S.pos = [c[0], 220, c[1] + 220]; S.pitch = -0.6; }
+    // soar in over the heart of the real 3D city, looking across its roofs
+    const c = S.cityC || S.meCentroid || [0, 0];
+    S.pos = [c[0], 48, c[1] + 110]; S.yaw = Math.PI; S.pitch = -0.28; S.vy = 0; S.t = 0;
+    if (/(^|&)rc=3(&|$)/.test(location.hash)) { S.pos = [c[0], 240, c[1] + 240]; S.pitch = -0.62; }
     S.keys = Object.create(null); S.vel = [0, 0, 0];
     S.active = true; window.__chamberActive = true;
     cv.classList.add('active'); hud.classList.add('active'); updateHud();
@@ -316,7 +319,7 @@ function escapeHTML(s) { return ('' + (s == null ? '' : s)).replace(/[&<>"]/g, c
 function updateHud() {
     hud.innerHTML = `<div class="ch-title">${escapeHTML(S.title)}</div>` +
         `<div class="ch-sub">${escapeHTML(S.sub)}</div>` +
-        `<div class="ch-hint">W A S D to walk · drag to look · hold space to rise & fly · esc to leave</div>`;
+        `<div class="ch-hint">W A S D to fly · space / shift up & down · drag to look · esc to leave</div>`;
 }
 function lookDir() { const cp = Math.cos(S.pitch); return [cp * Math.sin(S.yaw), Math.sin(S.pitch), cp * Math.cos(S.yaw)]; }
 
@@ -338,28 +341,26 @@ function frame() {
     const asp = cv.width / cv.height;
     const proj = perspective(60 * Math.PI / 180, asp, 0.5, 9000);
 
-    // WALK the streets: heading from yaw (looking up never lifts your feet), with
-    // gravity and building collision. Hold space to rise and fly for the overview,
-    // let go and you fall back to the ground --- walk down there, fly up here.
-    const fwd = [Math.sin(S.yaw), 0, Math.cos(S.yaw)], rgt = [Math.cos(S.yaw), 0, -Math.sin(S.yaw)];
-    const flying = S.pos[1] > EYE + 0.5;
-    const a = flying ? 0.004 * S.pos[1] : 0.05, k = S.keys, acc = [0, 0];
-    if (k['w'] || k['arrowup']) { acc[0] += fwd[0] * a; acc[1] += fwd[2] * a; }
-    if (k['s'] || k['arrowdown']) { acc[0] -= fwd[0] * a; acc[1] -= fwd[2] * a; }
-    if (k['d'] || k['arrowright']) { acc[0] += rgt[0] * a; acc[1] += rgt[2] * a; }
-    if (k['a'] || k['arrowleft']) { acc[0] -= rgt[0] * a; acc[1] -= rgt[2] * a; }
-    S.vel = [(S.vel[0] + acc[0]) * 0.82, 0, (S.vel[2] + acc[1]) * 0.82];
-    let nx = S.pos[0] + S.vel[0], nz = S.pos[2] + S.vel[2];
-    if (flying || !inBuilding(nx, S.pos[2])) S.pos[0] = nx; else S.vel[0] = 0;
-    if (flying || !inBuilding(S.pos[0], nz)) S.pos[2] = nz; else S.vel[2] = 0;
-    // vertical: space rises, shift sinks, gravity pulls back to the street
-    if (k[' '] || k['e']) S.vy += 0.045;
-    else if (k['shift'] || k['q'] || k['c']) S.vy -= 0.06;
-    else S.vy -= GRAV;
-    S.pos[1] += S.vy; S.vy *= 0.86;
-    if (S.pos[1] <= EYE) { S.pos[1] = EYE; S.vy = 0; }
-    if (S.pos[1] > 600) { S.pos[1] = 600; S.vy = 0; }
+    // FLY the city freely: move where you look, rise and sink, faster up high ---
+    // soar over the real 3D city, drop down among the buildings. Simple collision
+    // keeps you from passing through walls when you're down low.
     const f = lookDir();
+    const rgt = nrm(crs(f, [0, 1, 0]));
+    const sp = 0.012 * Math.max(8, S.pos[1]);
+    const k = S.keys, acc = [0, 0, 0];
+    const add = (v, s) => { acc[0] += v[0] * s; acc[1] += v[1] * s; acc[2] += v[2] * s; };
+    if (k['w'] || k['arrowup']) add(f, sp);
+    if (k['s'] || k['arrowdown']) add(f, -sp);
+    if (k['d'] || k['arrowright']) add(rgt, sp);
+    if (k['a'] || k['arrowleft']) add(rgt, -sp);
+    if (k[' '] || k['e']) acc[1] += sp;
+    if (k['shift'] || k['q'] || k['c']) acc[1] -= sp;
+    S.vel = [(S.vel[0] + acc[0]) * 0.85, (S.vel[1] + acc[1]) * 0.85, (S.vel[2] + acc[2]) * 0.85];
+    let nx = S.pos[0] + S.vel[0], ny = Math.max(2, S.pos[1] + S.vel[1]), nz = S.pos[2] + S.vel[2];
+    const low = ny < 40;                          // collide with walls only near the ground
+    if (!low || !inBuilding(nx, S.pos[2])) S.pos[0] = nx;
+    if (!low || !inBuilding(S.pos[0], nz)) S.pos[2] = nz;
+    S.pos[1] = ny;
     const view = lookAt(S.pos, [S.pos[0] + f[0], S.pos[1] + f[1], S.pos[2] + f[2]], [0, 1, 0]);
     const vp = mul(proj, view); S.vp = vp;
     const sun = nrm([0.5, 0.55, 0.35]);
@@ -382,15 +383,16 @@ function frame() {
     gl.uniformMatrix4fv(wloc.uVP, false, vp);
     gl.uniform3fv(wloc.uSun, sun); gl.uniform1f(wloc.uFogN, fogN); gl.uniform1f(wloc.uFogF, fogF);
     gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, facadeTex); gl.uniform1i(wloc.uTex, 0);
-    const drawWorld = (b, n, base, textured) => {
-        gl.uniform3fv(wloc.uBase, base); gl.uniform1f(wloc.uTextured, textured ? 1 : 0);
+    const drawWorld = (b, n, textured) => {
+        gl.uniform1f(wloc.uTextured, textured ? 1 : 0);
         gl.bindBuffer(gl.ARRAY_BUFFER, b);
-        gl.enableVertexAttribArray(wloc.aPos); gl.vertexAttribPointer(wloc.aPos, 3, gl.FLOAT, false, 32, 0);
-        gl.enableVertexAttribArray(wloc.aNrm); gl.vertexAttribPointer(wloc.aNrm, 3, gl.FLOAT, false, 32, 12);
-        gl.enableVertexAttribArray(wloc.aUV); gl.vertexAttribPointer(wloc.aUV, 2, gl.FLOAT, false, 32, 24);
+        gl.enableVertexAttribArray(wloc.aPos); gl.vertexAttribPointer(wloc.aPos, 3, gl.FLOAT, false, 44, 0);
+        gl.enableVertexAttribArray(wloc.aNrm); gl.vertexAttribPointer(wloc.aNrm, 3, gl.FLOAT, false, 44, 12);
+        gl.enableVertexAttribArray(wloc.aUV); gl.vertexAttribPointer(wloc.aUV, 2, gl.FLOAT, false, 44, 24);
+        gl.enableVertexAttribArray(wloc.aCol); gl.vertexAttribPointer(wloc.aCol, 3, gl.FLOAT, false, 44, 32);
         gl.drawArrays(gl.TRIANGLES, 0, n);
     };
-    drawWorld(ground, 6, [0.06, 0.056, 0.045], 0);       // dark base beneath the imagery
+    drawWorld(ground, 6, 0);
     // the real aerial ground, tile by tile
     if (sat.length) {
         gl.useProgram(tgprog); gl.uniformMatrix4fv(tgloc.uVP, false, vp);
@@ -403,7 +405,7 @@ function frame() {
             gl.uniform1f(tgloc.uSize, t.size); gl.bindTexture(gl.TEXTURE_2D, t.ready ? t.tex : sootTex);
             gl.drawElements(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0); }
     }
-    if (bld) drawWorld(bld.b, bld.n, [1, 1, 1], 1);      // real buildings, windowed façades
+    if (bld) drawWorld(bld.b, bld.n, 1);                 // real buildings, windowed façades
 
     // roads
     if (lines) { gl.useProgram(lprog); gl.uniformMatrix4fv(lloc.uVP, false, vp);
