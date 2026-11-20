@@ -73,6 +73,18 @@ void main(){ float fog=clamp((vZ-uFogN)/(uFogF-uFogN),0.0,1.0);
   vec4 c=texture2D(uTex,vUV); vec3 col=mix(c.rgb,soot,fog*0.85);
   gl_FragColor=vec4(col, uAlpha*(1.0-fog*0.5)); }`;
 
+// real satellite/aerial ground --- free, keyless Esri World Imagery, draped as
+// textured tiles at true metre scale. this is the real surface of the planet.
+const V_TG = `attribute vec2 aXZ; attribute vec2 aUV; uniform mat4 uVP;
+uniform float uOffX,uOffZ,uSize; varying vec2 vUV; varying float vZ;
+void main(){ vec4 w=vec4(aXZ.x*uSize+uOffX, 0.03, aXZ.y*uSize+uOffZ, 1.0);
+  gl_Position=uVP*w; vUV=aUV; vZ=gl_Position.w; }`;
+const F_TG = `precision mediump float; uniform sampler2D uTex; uniform float uFogN,uFogF;
+varying vec2 vUV; varying float vZ; const vec3 soot=vec3(0.03,0.026,0.02);
+void main(){ vec4 c=texture2D(uTex,vUV); float fog=clamp((vZ-uFogN)/(uFogF-uFogN),0.0,1.0);
+  gl_FragColor=vec4(mix(c.rgb*0.95,soot,fog),1.0); }`;
+let tgprog = null, tgloc = {}, tgQuad = null, sat = [];
+
 function sh(t, s) { const o = gl.createShader(t); gl.shaderSource(o, s); gl.compileShader(o);
     if (!gl.getShaderParameter(o, gl.COMPILE_STATUS)) console.warn(gl.getShaderInfoLog(o)); return o; }
 function program(vs, fs) { const p = gl.createProgram();
@@ -95,6 +107,11 @@ function initGL() {
     gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-0.5, -0.5, 0, 1, 0.5, -0.5, 1, 1, 0.5, 0.5, 1, 0, -0.5, 0.5, 0, 0]), gl.STATIC_DRAW);
     idxBuf = gl.createBuffer(); gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, idxBuf);
     gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array([0, 1, 2, 2, 3, 0]), gl.STATIC_DRAW);
+    tgprog = program(V_TG, F_TG);
+    for (const u of ['uVP', 'uOffX', 'uOffZ', 'uSize', 'uTex', 'uFogN', 'uFogF']) tgloc[u] = gl.getUniformLocation(tgprog, u);
+    tgloc.aXZ = gl.getAttribLocation(tgprog, 'aXZ'); tgloc.aUV = gl.getAttribLocation(tgprog, 'aUV');
+    tgQuad = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, tgQuad);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-0.5, -0.5, 0, 0, 0.5, -0.5, 1, 0, 0.5, 0.5, 1, 1, -0.5, 0.5, 0, 1]), gl.STATIC_DRAW);
     sootTex = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, sootTex);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array([12, 10, 8, 255]));
     gl.enable(gl.DEPTH_TEST); gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
@@ -163,8 +180,37 @@ function buildWorld(w) {
     lines = L.length ? { b: buf(L), n: L.length / 3 } : null;
 }
 
-// the surviving photographs, standing where the thing was --- its real skin,
-// clustered at its footprint so you meet them when you reach the site.
+// the real ground: fetch a grid of Esri World Imagery tiles around the place
+// (free, keyless, CORS-open) and lay them at true metre scale. This is the
+// actual surface of the earth there --- real, not invented.
+function loadSatellite(lat, lon) {
+    sat = [];
+    if (lat == null || lon == null) return;
+    const z = 17, n = Math.pow(2, z), R = 3;
+    const cxf = (lon + 180) / 360 * n;
+    const rl = lat * Math.PI / 180;
+    const cyf = (1 - Math.log(Math.tan(rl) + 1 / Math.cos(rl)) / Math.PI) / 2 * n;
+    const Tm = 2 * Math.PI * 6378137 * Math.cos(rl) / n;       // tile edge in metres
+    const ctx = Math.floor(cxf), cty = Math.floor(cyf);
+    for (let tx = ctx - R; tx <= ctx + R; tx++) for (let ty = cty - R; ty <= cty + R; ty++) {
+        const t = { offX: (tx + 0.5 - cxf) * Tm, offZ: (ty + 0.5 - cyf) * Tm, size: Tm,
+                    tex: gl.createTexture(), ready: false };
+        gl.bindTexture(gl.TEXTURE_2D, t.tex);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array([20, 22, 20, 255]));
+        const img = new Image(); img.crossOrigin = 'anonymous';
+        img.onload = (tt => () => { gl.bindTexture(gl.TEXTURE_2D, tt.tex);
+            try { gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, img);
+                gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+                gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+                gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+                gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+                tt.ready = true; } catch (e) {} })(t);
+        img.src = `https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/${z}/${ty}/${tx}`;
+        sat.push(t);
+    }
+}
+
+// (kept for other modes; not used in the world)
 function placePhotos(views) {
     const c = S.meCentroid || [0, 0], h = S.meH || 10;
     photos = views.map((v, i) => {
@@ -197,14 +243,16 @@ function openChamber(payload, ghostRec) {
     if (!gl && !initGL()) return;
     resize();
     world = payload.world || { buildings: [], roads: [], water: [], radius: 160 };
-    const views = payload.views || [];
     buildWorld(world);
-    placePhotos(views);
+    photos = [];
+    const ctr = world.center || [null, null];
+    loadSatellite(ctr[0], ctr[1]);               // the real ground, from orbit
     S.title = (ghostRec && (ghostRec.label || ghostRec.identity)) || '';
     const nb = (world.buildings || []).length;
-    S.sub = `standing where it stood · ${nb} real buildings · OpenStreetMap`;
+    S.sub = `standing where it stood · ${nb} real buildings · real aerial ground`;
     const c = S.meCentroid || [0, 0];
-    S.pos = [c[0], EYE, c[1] + 46]; S.yaw = Math.PI; S.pitch = 0.05; S.vy = 0; S.t = 0;
+    // begin high over the site, looking down like an eye arriving from orbit
+    S.pos = [c[0], 165, c[1] + 165]; S.yaw = Math.PI; S.pitch = -0.62; S.vy = 0; S.t = 0;
     S.keys = Object.create(null); S.vel = [0, 0, 0];
     S.active = true; window.__chamberActive = true;
     cv.classList.add('active'); hud.classList.add('active'); updateHud();
@@ -217,7 +265,7 @@ function escapeHTML(s) { return ('' + (s == null ? '' : s)).replace(/[&<>"]/g, c
 function updateHud() {
     hud.innerHTML = `<div class="ch-title">${escapeHTML(S.title)}</div>` +
         `<div class="ch-sub">${escapeHTML(S.sub)}</div>` +
-        `<div class="ch-hint">W A S D to walk · drag to look · space to jump · esc to leave</div>`;
+        `<div class="ch-hint">W A S D to fly · space / shift up & down · drag to look · esc to leave</div>`;
 }
 function lookDir() { const cp = Math.cos(S.pitch); return [cp * Math.sin(S.yaw), Math.sin(S.pitch), cp * Math.cos(S.yaw)]; }
 
@@ -237,25 +285,23 @@ function frame() {
     if (!S.active) return;
     S.t += 0.016;
     const asp = cv.width / cv.height;
-    const proj = perspective(64 * Math.PI / 180, asp, 0.1, 900);
+    const proj = perspective(60 * Math.PI / 180, asp, 0.5, 9000);
 
-    // walk: heading from yaw only; gravity holds you to the ground
-    const fwd = [Math.sin(S.yaw), 0, Math.cos(S.yaw)], rgt = [Math.cos(S.yaw), 0, -Math.sin(S.yaw)];
-    const a = 0.055, k = S.keys, acc = [0, 0];
-    if (k['w'] || k['arrowup']) { acc[0] += fwd[0] * a; acc[1] += fwd[2] * a; }
-    if (k['s'] || k['arrowdown']) { acc[0] -= fwd[0] * a; acc[1] -= fwd[2] * a; }
-    if (k['d'] || k['arrowright']) { acc[0] += rgt[0] * a; acc[1] += rgt[2] * a; }
-    if (k['a'] || k['arrowleft']) { acc[0] -= rgt[0] * a; acc[1] -= rgt[2] * a; }
-    S.vel = [(S.vel[0] + acc[0]) * 0.8, 0, (S.vel[2] + acc[1]) * 0.8];
-    // horizontal move with simple building collision (slide: try x then z)
-    let nx = S.pos[0] + S.vel[0], nz = S.pos[2] + S.vel[2];
-    if (!inBuilding(nx, S.pos[2])) S.pos[0] = nx; else S.vel[0] = 0;
-    if (!inBuilding(S.pos[0], nz)) S.pos[2] = nz; else S.vel[2] = 0;
-    // gravity + jump
-    S.vy -= GRAV; S.pos[1] += S.vy;
-    if (S.pos[1] <= EYE) { S.pos[1] = EYE; S.vy = 0; S.grounded = true; } else S.grounded = false;
-
+    // FREE FLIGHT over the real world: move where you look, rise and sink, and
+    // move faster the higher you are --- fast over the city, gentle at the street.
     const f = lookDir();
+    const rgt = nrm(crs(f, [0, 1, 0]));
+    const sp = 0.01 * Math.max(7, S.pos[1]);
+    const k = S.keys, acc = [0, 0, 0];
+    const add = (v, s) => { acc[0] += v[0] * s; acc[1] += v[1] * s; acc[2] += v[2] * s; };
+    if (k['w'] || k['arrowup']) add(f, sp);
+    if (k['s'] || k['arrowdown']) add(f, -sp);
+    if (k['d'] || k['arrowright']) add(rgt, sp);
+    if (k['a'] || k['arrowleft']) add(rgt, -sp);
+    if (k[' '] || k['e']) acc[1] += sp;
+    if (k['shift'] || k['q'] || k['c']) acc[1] -= sp;
+    S.vel = [(S.vel[0] + acc[0]) * 0.85, (S.vel[1] + acc[1]) * 0.85, (S.vel[2] + acc[2]) * 0.85];
+    S.pos = [S.pos[0] + S.vel[0], Math.max(1.6, S.pos[1] + S.vel[1]), S.pos[2] + S.vel[2]];
     const view = lookAt(S.pos, [S.pos[0] + f[0], S.pos[1] + f[1], S.pos[2] + f[2]], [0, 1, 0]);
     const vp = mul(proj, view); S.vp = vp;
     const sun = nrm([0.5, 0.55, 0.35]);
@@ -277,8 +323,20 @@ function frame() {
         gl.enableVertexAttribArray(wloc.aNrm); gl.vertexAttribPointer(wloc.aNrm, 3, gl.FLOAT, false, 24, 12);
         gl.drawArrays(gl.TRIANGLES, 0, n);
     };
-    drawWorld(ground, 6, [0.11, 0.1, 0.082]);
-    if (bld) drawWorld(bld.b, bld.n, [0.27, 0.25, 0.21]);
+    drawWorld(ground, 6, [0.06, 0.056, 0.045]);          // dark base beneath the imagery
+    // the real aerial ground, tile by tile
+    if (sat.length) {
+        gl.useProgram(tgprog); gl.uniformMatrix4fv(tgloc.uVP, false, vp);
+        gl.uniform1f(tgloc.uFogN, fogN); gl.uniform1f(tgloc.uFogF, fogF);
+        gl.bindBuffer(gl.ARRAY_BUFFER, tgQuad);
+        gl.enableVertexAttribArray(tgloc.aXZ); gl.vertexAttribPointer(tgloc.aXZ, 2, gl.FLOAT, false, 16, 0);
+        gl.enableVertexAttribArray(tgloc.aUV); gl.vertexAttribPointer(tgloc.aUV, 2, gl.FLOAT, false, 16, 8);
+        gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, idxBuf); gl.activeTexture(gl.TEXTURE0); gl.uniform1i(tgloc.uTex, 0);
+        for (const t of sat) { gl.uniform1f(tgloc.uOffX, t.offX); gl.uniform1f(tgloc.uOffZ, t.offZ);
+            gl.uniform1f(tgloc.uSize, t.size); gl.bindTexture(gl.TEXTURE_2D, t.ready ? t.tex : sootTex);
+            gl.drawElements(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0); }
+    }
+    if (bld) drawWorld(bld.b, bld.n, [0.24, 0.22, 0.19]);
 
     // roads
     if (lines) { gl.useProgram(lprog); gl.uniformMatrix4fv(lloc.uVP, false, vp);
@@ -330,8 +388,7 @@ cv.addEventListener('pointerup', e => { S.dragging = false; cv.classList.remove(
 addEventListener('keydown', e => { if (!S.active) return;
     if (e.key === 'Escape') { closeChamber(); return; }
     const k = e.key.toLowerCase();
-    if (k === ' ' && S.grounded) { S.vy = JUMP; S.grounded = false; }
-    if ('wasd '.includes(k) || k.startsWith('arrow')) { S.keys[k] = true; e.preventDefault(); } });
+    if ('wasdeqc '.includes(k) || k === 'shift' || k.startsWith('arrow')) { S.keys[k] = true; e.preventDefault(); } });
 addEventListener('keyup', e => { if (S.active) S.keys[e.key.toLowerCase()] = false; });
 addEventListener('resize', () => { if (S.active) resize(); });
 
