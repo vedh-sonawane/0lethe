@@ -16,12 +16,13 @@ let gl = null, prog = null, loc = {}, quadBuf = null, idxBuf = null, ready = fal
 
 const S = {
     active: false, views: [], title: '', sub: '',
-    az: 0.5, el: 0.12, azV: 0, elV: 0,
-    rad: 8.2, targetRad: 8.2, dragging: false, lx: 0, ly: 0, moved: 0,
-    t: 0, raf: 0, pid: null,
-    mode: 'orbit', enterIdx: -1,            // 'orbit' | 'enter' (standing inside one eye)
-    eye: [0, 0, 9], target: [0, 0, 0],      // eased camera, so entering a photo is a flight
-    px: -1e4, py: -1e4,                      // last pointer, device px, for picking
+    // a true first-person flyer: a position in the world and where it's looking.
+    pos: [0, 0, 13], yaw: 0, pitch: 0,
+    vel: [0, 0, 0],                         // eased motion, so flight feels weighted
+    keys: Object.create(null),              // WASD / space / shift held right now
+    tgt: null,                              // optional glide target (set by clicking an eye)
+    dragging: false, lx: 0, ly: 0, moved: 0,
+    t: 0, raf: 0, pid: null, enterIdx: -1,
 };
 
 // ---- minimal column-major mat4 (no gl-matrix) -----------------------------
@@ -265,19 +266,19 @@ function openChamber(viewsData, ghost) {
     const ys = S.views.map(v => v.y).filter(x => x != null);
     const span = ys.length ? (Math.min(...ys) + (ys.length > 1 ? '–' + Math.max(...ys) : '')) : '';
     S.sub = `${S.views.length} surviving eyes${span ? '   ·   ' + span : ''}`;
-    S.az = 0.5; S.el = 0.12; S.rad = 9.5; S.targetRad = 7; S.t = 0;
-    S.mode = 'orbit'; S.enterIdx = -1;
-    S.eye = [9.5 * Math.cos(0.5), 1.1, 9.5 * Math.sin(0.5)]; S.target = [0, 0, 0]; S.up = [0, 1, 0];
-    S.active = true;
+    S.t = 0; S.enterIdx = -1; S.tgt = null; S.keys = Object.create(null); S.vel = [0, 0, 0];
+    // start outside the cloud, looking into it, ready to fly in
+    S.pos = [0, 1.2, 13]; S.yaw = Math.PI; S.pitch = -0.06; S.eye = S.pos;
+    S.active = true; window.__chamberActive = true;
     cv.classList.add('active'); hud.classList.add('active');
     updateHud();
     cancelAnimationFrame(S.raf);
     S.raf = requestAnimationFrame(frame);
-    if (/(^|&)rc=2(&|$)/.test(location.hash))        // dev: deep-link inside one eye
-        setTimeout(() => { if (S.active) enterView(0); }, 300);
+    if (/(^|&)rc=2(&|$)/.test(location.hash))        // dev: deep-link flying to one eye
+        setTimeout(() => { if (S.active) flyToView(0); }, 300);
 }
 function closeChamber() {
-    S.active = false;
+    S.active = false; window.__chamberActive = false;
     cv.classList.remove('active'); hud.classList.remove('active');
     cancelAnimationFrame(S.raf);
 }
@@ -288,45 +289,44 @@ function escapeHTML(s) {
 
 const lerp3 = (a, b, k) => [a[0] + (b[0] - a[0]) * k, a[1] + (b[1] - a[1]) * k, a[2] + (b[2] - a[2]) * k];
 
+function lookDir() {
+    const cp = Math.cos(S.pitch);
+    return [cp * Math.sin(S.yaw), Math.sin(S.pitch), cp * Math.cos(S.yaw)];
+}
+
 function frame() {
     if (!S.active) return;
     S.t += 0.016;
     const asp = cv.width / cv.height;
-    const proj = perspective(52 * Math.PI / 180, asp, 0.05, 90);
+    const fovy = 60 * Math.PI / 180;
+    const proj = perspective(fovy, asp, 0.03, 140);
 
-    // where the camera WANTS to be: orbiting the whole thing, or standing right
-    // in front of one surviving eye, square-on and close enough that the real
-    // photograph fills the whole view --- you are inside it.
-    let wantEye, wantTarget, wantUp = [0, 1, 0];
-    const fovy = 52 * Math.PI / 180;
-    if (S.mode === 'enter' && S.enterIdx >= 0) {
-        const v = S.views[S.enterIdx];
-        const n = norm(v.pos);
-        let right = cross([0, 1, 0], n);
-        if (Math.hypot(right[0], right[1], right[2]) < 1e-4) right = [1, 0, 0];
-        right = norm(right);
-        const up = cross(n, right);
-        const h = 1.9, w = h * (v.aspect || 1.4);
-        const distH = (h / 2) / Math.tan(fovy / 2);
-        const fovx = 2 * Math.atan(Math.tan(fovy / 2) * asp);
-        const distW = (w / 2) / Math.tan(fovx / 2);
-        const dist = Math.min(distH, distW) * 0.98;      // cover the frame
-        wantEye = [v.pos[0] + n[0] * dist, v.pos[1] + n[1] * dist, v.pos[2] + n[2] * dist];
-        wantTarget = v.pos;
-        wantUp = up;                                      // photo stands upright
+    const fwd = lookDir();
+    const right = norm(cross(fwd, [0, 1, 0]));
+
+    if (S.tgt) {
+        // gliding toward an eye you clicked, until you take the stick back
+        S.pos = lerp3(S.pos, S.tgt.pos, 0.09);
+        let dy = ((S.tgt.yaw - S.yaw + Math.PI * 3) % (Math.PI * 2)) - Math.PI;
+        S.yaw += dy * 0.12; S.pitch += (S.tgt.pitch - S.pitch) * 0.12;
+        const d = Math.hypot(S.pos[0] - S.tgt.pos[0], S.pos[1] - S.tgt.pos[1], S.pos[2] - S.tgt.pos[2]);
+        if (d < 0.04) S.tgt = null;
     } else {
-        if (!S.dragging) { S.az += 0.0013; S.az += S.azV; S.azV *= 0.93; S.elV *= 0.93; S.el += S.elV; }
-        S.el = Math.max(-1.2, Math.min(1.2, S.el));
-        S.rad += (S.targetRad - S.rad) * 0.08;
-        const ce = Math.cos(S.el), se = Math.sin(S.el);
-        wantEye = [S.rad * ce * Math.cos(S.az), S.rad * se, S.rad * ce * Math.sin(S.az)];
-        wantTarget = [0, 0, 0];
+        // FREE FLIGHT: move where you look. W/S fwd-back, A/D strafe, space/shift lift
+        const a = 0.085, k = S.keys, acc = [0, 0, 0];
+        const add = (v, s) => { acc[0] += v[0] * s; acc[1] += v[1] * s; acc[2] += v[2] * s; };
+        if (k['w'] || k['arrowup']) add(fwd, a);
+        if (k['s'] || k['arrowdown']) add(fwd, -a);
+        if (k['d'] || k['arrowright']) add(right, a);
+        if (k['a'] || k['arrowleft']) add(right, -a);
+        if (k[' '] || k['e']) acc[1] += a;
+        if (k['shift'] || k['q'] || k['c']) acc[1] -= a;
+        S.vel = [(S.vel[0] + acc[0]) * 0.84, (S.vel[1] + acc[1]) * 0.84, (S.vel[2] + acc[2]) * 0.84];
+        S.pos = [S.pos[0] + S.vel[0], S.pos[1] + S.vel[1], S.pos[2] + S.vel[2]];
     }
-    const k = S.mode === 'enter' ? 0.1 : 0.16;
-    S.eye = lerp3(S.eye, wantEye, k);
-    S.target = lerp3(S.target, wantTarget, k);
-    S.up = norm(lerp3(S.up || [0, 1, 0], wantUp, k));
-    const view = lookAt(S.eye, S.target, S.up);
+    S.eye = S.pos;
+    const f2 = lookDir();
+    const view = lookAt(S.pos, [S.pos[0] + f2[0], S.pos[1] + f2[1], S.pos[2] + f2[2]], [0, 1, 0]);
     const vp = mul(proj, view);
     S.vp = vp;
 
@@ -337,8 +337,8 @@ function frame() {
     // the ground grid --- a place to stand
     gl.useProgram(lprog);
     gl.uniformMatrix4fv(lloc.uVP, false, vp);
-    gl.uniform1f(lloc.uFogN, 6.0); gl.uniform1f(lloc.uFogF, 34.0);
-    gl.uniform1f(lloc.uAlpha, S.mode === 'enter' ? 0.05 : 0.18);
+    gl.uniform1f(lloc.uFogN, 6.0); gl.uniform1f(lloc.uFogF, 40.0);
+    gl.uniform1f(lloc.uAlpha, 0.16);
     gl.uniform3f(lloc.uCol, 0.42, 0.40, 0.36);
     gl.bindBuffer(gl.ARRAY_BUFFER, gridBuf);
     gl.enableVertexAttribArray(lloc.aP);
@@ -366,7 +366,7 @@ function frame() {
 
     for (const o of ord) {
         const v = S.views[o.i];
-        const entered = S.mode === 'enter' && o.i === S.enterIdx;
+        const entered = o.i === S.enterIdx;
         const rv = entered ? 1 : Math.max(0, Math.min(1, (S.t * 9 - v.reveal * 0.6)));
         if (rv <= 0) continue;
         const h = 1.9, w = h * (v.aspect || 1.4);
@@ -406,31 +406,35 @@ function pick(sx, sy) {
     }
     return best;
 }
-function enterView(i) {
-    S.mode = 'enter'; S.enterIdx = i;
-    loadFull(S.views[i]);
-    updateHud();
+// clicking an eye glides you right up to it, square-on, and loads its full
+// resolution --- you fly to it and it becomes the real thing filling your view.
+function flyToView(i) {
+    const v = S.views[i];
+    const n = norm(v.pos);
+    const h = 1.9, w = h * (v.aspect || 1.4);
+    const fovy = 60 * Math.PI / 180, asp = cv.width / cv.height;
+    const distH = (h / 2) / Math.tan(fovy / 2);
+    const distW = (w / 2) / Math.tan(2 * Math.atan(Math.tan(fovy / 2) * asp) / 2);
+    const dist = Math.min(distH, distW) * 1.02;
+    const eye = [v.pos[0] + n[0] * dist, v.pos[1] + n[1] * dist, v.pos[2] + n[2] * dist];
+    // look back toward the photo (opposite the outward normal)
+    const yaw = Math.atan2(-n[0], -n[2]), pitch = Math.asin(Math.max(-1, Math.min(1, -n[1])));
+    S.tgt = { pos: eye, yaw, pitch };
+    S.enterIdx = i; loadFull(v); updateHud();
 }
-function exitView() { S.mode = 'orbit'; S.enterIdx = -1; updateHud(); }
 
 function updateHud() {
-    if (S.mode === 'enter' && S.enterIdx >= 0) {
-        const v = S.views[S.enterIdx];
-        const parts = [v.y != null ? v.y : null, (v.author || '').replace(/\s*\(.*$/, '') || null]
-            .filter(Boolean).join('   ·   ');
-        hud.innerHTML = `<div class="ch-title">${escapeHTML(S.title)}</div>` +
-            `<div class="ch-sub">${escapeHTML(parts || 'a surviving eye')}</div>` +
-            `<div class="ch-hint">you are inside one surviving photograph` +
-            `&nbsp;&nbsp;·&nbsp;&nbsp;click to step back&nbsp;&nbsp;·&nbsp;&nbsp;esc to close</div>`;
-    } else {
-        hud.innerHTML = `<div class="ch-title">${escapeHTML(S.title)}</div>` +
-            `<div class="ch-sub">${escapeHTML(S.sub)}</div>` +
-            `<div class="ch-hint">drag to orbit&nbsp;&nbsp;·&nbsp;&nbsp;scroll to fly in` +
-            `&nbsp;&nbsp;·&nbsp;&nbsp;click an eye to step inside&nbsp;&nbsp;·&nbsp;&nbsp;esc to close</div>`;
-    }
+    const v = S.enterIdx >= 0 ? S.views[S.enterIdx] : null;
+    const line = v ? [v.y != null ? v.y : null, (v.author || '').replace(/\s*\(.*$/, '') || null]
+        .filter(Boolean).join('   ·   ') : S.sub;
+    hud.innerHTML = `<div class="ch-title">${escapeHTML(S.title)}</div>` +
+        `<div class="ch-sub">${escapeHTML(line || S.sub)}</div>` +
+        `<div class="ch-hint">W A S D · space / shift to fly` +
+        `&nbsp;&nbsp;·&nbsp;&nbsp;drag to look&nbsp;&nbsp;·&nbsp;&nbsp;click an eye to approach` +
+        `&nbsp;&nbsp;·&nbsp;&nbsp;esc to leave</div>`;
 }
 
-// ---- interaction ----------------------------------------------------------
+// ---- interaction: fly and look --------------------------------------------
 cv.addEventListener('pointerdown', e => {
     S.dragging = true; S.moved = 0; S.lx = e.clientX; S.ly = e.clientY;
     S.pid = e.pointerId; cv.setPointerCapture(e.pointerId); cv.classList.add('dragging');
@@ -439,25 +443,34 @@ cv.addEventListener('pointermove', e => {
     if (!S.dragging) return;
     const dx = e.clientX - S.lx, dy = e.clientY - S.ly;
     S.lx = e.clientX; S.ly = e.clientY; S.moved += Math.abs(dx) + Math.abs(dy);
-    S.az -= dx * 0.006; S.el += dy * 0.006; S.azV = -dx * 0.0006; S.elV = dy * 0.0006;
+    S.tgt = null;                                   // taking the stick back
+    S.yaw += dx * 0.004; S.pitch = Math.max(-1.45, Math.min(1.45, S.pitch - dy * 0.004));
 });
 cv.addEventListener('pointerup', e => {
     S.dragging = false; cv.classList.remove('dragging');
-    if (S.moved >= 6) return;                    // a drag, not a click
+    if (S.moved >= 6) return;                        // a drag-look, not a click
     const dpr = cv.width / innerWidth;
     const idx = pick(e.clientX * dpr, e.clientY * dpr);
-    if (idx >= 0) enterView(idx);                // step inside a surviving eye
-    else if (S.mode === 'enter') exitView();     // click away: step back out
-    else closeChamber();                         // click the void: leave
+    if (idx >= 0) flyToView(idx);                   // approach that surviving eye
+    else { S.enterIdx = -1; updateHud(); }          // click the void: deselect
 });
 cv.addEventListener('wheel', e => {
-    e.preventDefault();
-    if (S.mode === 'enter') { exitView(); return; }     // pull back out of the photograph
-    S.targetRad = Math.max(1.4, Math.min(16, S.targetRad + e.deltaY * 0.004));
+    e.preventDefault();                             // scroll = thrust along your gaze
+    S.tgt = null;
+    const f = lookDir(), s = -e.deltaY * 0.006;
+    S.vel = [S.vel[0] + f[0] * s, S.vel[1] + f[1] * s, S.vel[2] + f[2] * s];
 }, { passive: false });
 addEventListener('keydown', e => {
-    if (!S.active || e.key !== 'Escape') return;
-    if (S.mode === 'enter') exitView(); else closeChamber();
+    if (!S.active) return;
+    if (e.key === 'Escape') { closeChamber(); return; }
+    const k = e.key.toLowerCase();
+    if ('wasdeqc '.includes(k) || k.startsWith('arrow') || k === 'shift') {
+        S.keys[k] = true; S.tgt = null; e.preventDefault();
+    }
+});
+addEventListener('keyup', e => {
+    if (!S.active) return;
+    S.keys[e.key.toLowerCase()] = false;
 });
 addEventListener('resize', () => { if (S.active) resize(); });
 

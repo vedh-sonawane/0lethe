@@ -394,6 +394,9 @@ function drawCursor() {
 
 // ---- frame ----------------------------------------------------------------
 function frame(now) {
+    // while standing inside the reconstruction chamber, the field sleeps ---
+    // one heavy loop at a time, so nothing stutters.
+    if (window.__chamberActive) { requestAnimationFrame(frame); return; }
     revealFrames++;
     // ease the camera toward its target --- the machine flies between connected
     // lost things rather than jumping
