@@ -46,7 +46,7 @@ void main(){ gl_Position = uVP*vec4(aPos,1.0); vN=aNrm; vZ=gl_Position.w; vY=aPo
 const F_WORLD = `precision mediump float;
 uniform vec3 uSun; uniform vec3 uBase; uniform float uFogN,uFogF; uniform float uAmb;
 varying vec3 vN; varying float vZ; varying float vY;
-const vec3 soot=vec3(0.028,0.024,0.019);
+const vec3 soot=vec3(0.44,0.42,0.39);
 void main(){
   vec3 n=normalize(vN);
   float l=max(dot(n,uSun),0.0);
@@ -60,14 +60,14 @@ void main(){
 const V_LINE = `attribute vec3 aPos; uniform mat4 uVP; varying float vZ;
 void main(){ gl_Position=uVP*vec4(aPos,1.0); vZ=gl_Position.w; }`;
 const F_LINE = `precision mediump float; uniform float uFogN,uFogF,uAlpha; uniform vec3 uCol;
-varying float vZ; const vec3 soot=vec3(0.028,0.024,0.019);
+varying float vZ; const vec3 soot=vec3(0.44,0.42,0.39);
 void main(){ float fog=clamp((vZ-uFogN)/(uFogF-uFogN),0.0,1.0);
   gl_FragColor=vec4(mix(uCol,soot,fog), uAlpha*(1.0-fog)); }`;
 const V_PH = `attribute vec2 aPos; attribute vec2 aUV; uniform mat4 uMVP,uMV;
 varying vec2 vUV; varying float vZ;
 void main(){ vUV=aUV; vZ=-(uMV*vec4(aPos,0.0,1.0)).z; gl_Position=uMVP*vec4(aPos,0.0,1.0); }`;
 const F_PH = `precision mediump float; uniform sampler2D uTex; uniform float uAlpha,uMode,uFogN,uFogF;
-varying vec2 vUV; varying float vZ; const vec3 soot=vec3(0.028,0.024,0.019);
+varying vec2 vUV; varying float vZ; const vec3 soot=vec3(0.44,0.42,0.39);
 void main(){ float fog=clamp((vZ-uFogN)/(uFogF-uFogN),0.0,1.0);
   if(uMode>0.5){ gl_FragColor=vec4(mix(vec3(0.95,0.93,0.86),soot,fog*0.8),uAlpha*(1.0-fog*0.8)); return; }
   vec4 c=texture2D(uTex,vUV); vec3 col=mix(c.rgb,soot,fog*0.85);
@@ -80,10 +80,19 @@ uniform float uOffX,uOffZ,uSize; varying vec2 vUV; varying float vZ;
 void main(){ vec4 w=vec4(aXZ.x*uSize+uOffX, 0.03, aXZ.y*uSize+uOffZ, 1.0);
   gl_Position=uVP*w; vUV=aUV; vZ=gl_Position.w; }`;
 const F_TG = `precision mediump float; uniform sampler2D uTex; uniform float uFogN,uFogF;
-varying vec2 vUV; varying float vZ; const vec3 soot=vec3(0.03,0.026,0.02);
+varying vec2 vUV; varying float vZ; const vec3 soot=vec3(0.44,0.42,0.39);
 void main(){ vec4 c=texture2D(uTex,vUV); float fog=clamp((vZ-uFogN)/(uFogF-uFogN),0.0,1.0);
   gl_FragColor=vec4(mix(c.rgb*0.95,soot,fog),1.0); }`;
 let tgprog = null, tgloc = {}, tgQuad = null, sat = [];
+
+// a real sky all around --- a dome that moves with you, so there is never a void:
+// warm haze at the horizon rising to a deep dusk overhead.
+const V_SKY = `attribute vec3 aPos; uniform mat4 uVP; uniform vec3 uCam; uniform float uR;
+varying float vY; void main(){ gl_Position=uVP*vec4(aPos*uR+uCam,1.0); vY=aPos.y; }`;
+const F_SKY = `precision mediump float; uniform vec3 uZen,uHaze; varying float vY;
+void main(){ float t=clamp(vY,0.0,1.0); gl_FragColor=vec4(mix(uHaze,uZen,pow(t,0.62)),1.0); }`;
+let skyprog = null, skyloc = {}, skyBuf = null, skyN = 0;
+const HAZE = [0.44, 0.42, 0.39], ZEN = [0.10, 0.12, 0.18];
 
 function sh(t, s) { const o = gl.createShader(t); gl.shaderSource(o, s); gl.compileShader(o);
     if (!gl.getShaderParameter(o, gl.COMPILE_STATUS)) console.warn(gl.getShaderInfoLog(o)); return o; }
@@ -107,6 +116,16 @@ function initGL() {
     gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-0.5, -0.5, 0, 1, 0.5, -0.5, 1, 1, 0.5, 0.5, 1, 0, -0.5, 0.5, 0, 0]), gl.STATIC_DRAW);
     idxBuf = gl.createBuffer(); gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, idxBuf);
     gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array([0, 1, 2, 2, 3, 0]), gl.STATIC_DRAW);
+    skyprog = program(V_SKY, F_SKY);
+    for (const u of ['uVP', 'uCam', 'uR', 'uZen', 'uHaze']) skyloc[u] = gl.getUniformLocation(skyprog, u);
+    skyloc.aPos = gl.getAttribLocation(skyprog, 'aPos');
+    { const V = [], rings = 16, segs = 24, pt = (a, b) => [Math.sin(a) * Math.cos(b), Math.cos(a), Math.sin(a) * Math.sin(b)];
+      for (let i = 0; i < rings; i++) for (let j = 0; j < segs; j++) {
+        const a0 = i / rings * Math.PI, a1 = (i + 1) / rings * Math.PI, b0 = j / segs * 2 * Math.PI, b1 = (j + 1) / segs * 2 * Math.PI;
+        const A = pt(a0, b0), B = pt(a1, b0), C = pt(a1, b1), D = pt(a0, b1);
+        V.push(...A, ...B, ...C, ...A, ...C, ...D); }
+      skyN = V.length / 3; skyBuf = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, skyBuf);
+      gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(V), gl.STATIC_DRAW); }
     tgprog = program(V_TG, F_TG);
     for (const u of ['uVP', 'uOffX', 'uOffZ', 'uSize', 'uTex', 'uFogN', 'uFogF']) tgloc[u] = gl.getUniformLocation(tgprog, u);
     tgloc.aXZ = gl.getAttribLocation(tgprog, 'aXZ'); tgloc.aUV = gl.getAttribLocation(tgprog, 'aUV');
@@ -148,8 +167,8 @@ function extrude(poly, h, V) {                  // walls + a centroid-fan roof, 
 
 function buildWorld(w) {
     S.foot = []; S.meCentroid = [0, 0]; S.meH = 10; ghost = null;
-    // ground: a big lit plane
-    const R = (w.radius || 320) * 1.6;
+    // ground: a big plane out to the horizon, beneath the imagery
+    const R = Math.max((w.radius || 320) * 1.6, 4000);
     ground = buf([-R, 0, -R, 0, 1, 0, R, 0, -R, 0, 1, 0, R, 0, R, 0, 1, 0,
                   -R, 0, -R, 0, 1, 0, R, 0, R, 0, 1, 0, -R, 0, R, 0, 1, 0]);
     // solid buildings (everything but the lost thing) merged into one mesh
@@ -186,7 +205,7 @@ function buildWorld(w) {
 function loadSatellite(lat, lon) {
     sat = [];
     if (lat == null || lon == null) return;
-    const z = 17, n = Math.pow(2, z), R = 3;
+    const z = 17, n = Math.pow(2, z), R = 5;
     const cxf = (lon + 180) / 360 * n;
     const rl = lat * Math.PI / 180;
     const cyf = (1 - Math.log(Math.tan(rl) + 1 / Math.cos(rl)) / Math.PI) / 2 * n;
@@ -253,6 +272,7 @@ function openChamber(payload, ghostRec) {
     const c = S.meCentroid || [0, 0];
     // begin high over the site, looking down like an eye arriving from orbit
     S.pos = [c[0], 165, c[1] + 165]; S.yaw = Math.PI; S.pitch = -0.62; S.vy = 0; S.t = 0;
+    if (/(^|&)rc=3(&|$)/.test(location.hash)) { S.pos = [c[0], 48, c[1] + 150]; S.pitch = -0.05; }
     S.keys = Object.create(null); S.vel = [0, 0, 0];
     S.active = true; window.__chamberActive = true;
     cv.classList.add('active'); hud.classList.add('active'); updateHud();
@@ -306,10 +326,18 @@ function frame() {
     const vp = mul(proj, view); S.vp = vp;
     const sun = nrm([0.5, 0.55, 0.35]);
 
-    // sky: clear to a dusk-soot; the horizon fog does the rest
     gl.viewport(0, 0, cv.width, cv.height);
-    gl.clearColor(0.05, 0.045, 0.038, 1); gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
-    const fogN = 130, fogF = 1500;
+    gl.clearColor(HAZE[0], HAZE[1], HAZE[2], 1); gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+    const fogN = 160, fogF = 2600;
+
+    // the sky, all around you --- a dome riding with the camera. no void, ever.
+    gl.useProgram(skyprog); gl.depthMask(false);
+    gl.uniformMatrix4fv(skyloc.uVP, false, vp); gl.uniform3fv(skyloc.uCam, S.pos);
+    gl.uniform1f(skyloc.uR, 6000); gl.uniform3fv(skyloc.uZen, ZEN); gl.uniform3fv(skyloc.uHaze, HAZE);
+    gl.bindBuffer(gl.ARRAY_BUFFER, skyBuf);
+    gl.enableVertexAttribArray(skyloc.aPos); gl.vertexAttribPointer(skyloc.aPos, 3, gl.FLOAT, false, 0, 0);
+    gl.drawArrays(gl.TRIANGLES, 0, skyN);
+    gl.depthMask(true);
 
     // ground + buildings, lit
     gl.useProgram(wloc.p);

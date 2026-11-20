@@ -500,7 +500,7 @@ async function focusGhost(id) {
     focusId = id;
     detail = await loadJSON('/api/ghost/' + id, 'ghosts/' + id + '.json');
     renderReadout();
-    if (detail && (detail._views || detail._world) && window.openChamber && /(^|&)rc=[12](&|$)/.test(location.hash))
+    if (detail && (detail._views || detail._world) && window.openChamber && /(^|&)rc=[123](&|$)/.test(location.hash))
         window.openChamber({ world: detail._world, views: detail._views || [] }, detail.ghost);
     const m = markById.get(id);        // fly the camera to the thing we just focused
     if (m) { camTarget.x = m.field_x; camTarget.y = m.field_y;
