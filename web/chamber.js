@@ -40,22 +40,25 @@ const crs = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0
 function nrm(v) { const l = Math.hypot(v[0], v[1], v[2]) || 1; return [v[0] / l, v[1] / l, v[2] / l]; }
 
 // ---- shaders --------------------------------------------------------------
-const V_WORLD = `attribute vec3 aPos; attribute vec3 aNrm;
-uniform mat4 uVP; varying vec3 vN; varying float vZ; varying float vY;
-void main(){ gl_Position = uVP*vec4(aPos,1.0); vN=aNrm; vZ=gl_Position.w; vY=aPos.y; }`;
+const V_WORLD = `attribute vec3 aPos; attribute vec3 aNrm; attribute vec2 aUV;
+uniform mat4 uVP; varying vec3 vN; varying float vZ; varying vec2 vUV;
+void main(){ gl_Position = uVP*vec4(aPos,1.0); vN=aNrm; vZ=gl_Position.w; vUV=aUV; }`;
 const F_WORLD = `precision mediump float;
-uniform vec3 uSun; uniform vec3 uBase; uniform float uFogN,uFogF; uniform float uAmb;
-varying vec3 vN; varying float vZ; varying float vY;
-const vec3 soot=vec3(0.44,0.42,0.39);
+uniform vec3 uSun; uniform vec3 uBase; uniform float uFogN,uFogF; uniform float uTextured;
+uniform sampler2D uTex;
+varying vec3 vN; varying float vZ; varying vec2 vUV;
+const vec3 haze=vec3(0.44,0.42,0.39);
 void main(){
   vec3 n=normalize(vN);
   float l=max(dot(n,uSun),0.0);
   float sky=clamp(n.y*0.5+0.5,0.0,1.0);
-  float lum = 0.42 + 0.95*l + 0.30*sky;                    // ambient floor + low sun + skylight
-  vec3 col=uBase*lum;
-  col+=vec3(0.05,0.035,0.02)*l*clamp(vY*0.03,0.0,1.0);     // sunlit upper storeys warm
+  float lum = 0.34 + 1.15*l + 0.26*sky;                    // strong sun: lit vs shadowed sides read
+  vec3 col;
+  if(uTextured>0.5 && vUV.x>=0.0){ col=texture2D(uTex,vUV).rgb*lum; }   // facade: windows + wall
+  else if(uTextured>0.5){ col=vec3(0.17,0.16,0.14)*lum; }              // roof
+  else { col=uBase*lum; }                                               // ground base
   float fog=clamp((vZ-uFogN)/(uFogF-uFogN),0.0,1.0);
-  gl_FragColor=vec4(mix(col,soot,fog),1.0);
+  gl_FragColor=vec4(mix(col,haze,fog),1.0);
 }`;
 const V_LINE = `attribute vec3 aPos; uniform mat4 uVP; varying float vZ;
 void main(){ gl_Position=uVP*vec4(aPos,1.0); vZ=gl_Position.w; }`;
@@ -94,6 +97,29 @@ void main(){ float t=clamp(vY,0.0,1.0); gl_FragColor=vec4(mix(uHaze,uZen,pow(t,0
 let skyprog = null, skyloc = {}, skyBuf = null, skyN = 0;
 const HAZE = [0.44, 0.42, 0.39], ZEN = [0.10, 0.12, 0.18];
 
+let facadeTex = null;
+// one window bay drawn to a canvas, tiled across every façade so buildings read
+// as real buildings --- rows of windows and floors --- not grey blocks. The only
+// thing generated; the shapes, heights and positions are all real map survey.
+function makeFacade() {
+    const c = document.createElement('canvas'); c.width = c.height = 64;
+    const x = c.getContext('2d');
+    x.fillStyle = '#9a9184'; x.fillRect(0, 0, 64, 64);                               // wall
+    x.fillStyle = '#3c434d'; x.fillRect(11, 9, 42, 46);                               // glass
+    const g = x.createLinearGradient(0, 9, 0, 55); g.addColorStop(0, '#5a636f'); g.addColorStop(1, '#333a43');
+    x.fillStyle = g; x.fillRect(11, 9, 42, 46);
+    x.strokeStyle = '#726856'; x.lineWidth = 3; x.strokeRect(11, 9, 42, 46);          // frame
+    x.fillStyle = '#726856'; x.fillRect(31, 9, 2, 46); x.fillRect(11, 31, 42, 2);     // mullions
+    const t = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, t);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, c);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.REPEAT);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.generateMipmap(gl.TEXTURE_2D);
+    return t;
+}
+
 function sh(t, s) { const o = gl.createShader(t); gl.shaderSource(o, s); gl.compileShader(o);
     if (!gl.getShaderParameter(o, gl.COMPILE_STATUS)) console.warn(gl.getShaderInfoLog(o)); return o; }
 function program(vs, fs) { const p = gl.createProgram();
@@ -104,8 +130,10 @@ function initGL() {
     gl = cv.getContext('webgl', { alpha: true, antialias: true, depth: true });
     if (!gl) return false;
     wloc.p = program(V_WORLD, F_WORLD);
-    for (const u of ['uVP', 'uSun', 'uBase', 'uFogN', 'uFogF', 'uAmb']) wloc[u] = gl.getUniformLocation(wloc.p, u);
+    for (const u of ['uVP', 'uSun', 'uBase', 'uFogN', 'uFogF', 'uTextured', 'uTex']) wloc[u] = gl.getUniformLocation(wloc.p, u);
     wloc.aPos = gl.getAttribLocation(wloc.p, 'aPos'); wloc.aNrm = gl.getAttribLocation(wloc.p, 'aNrm');
+    wloc.aUV = gl.getAttribLocation(wloc.p, 'aUV');
+    facadeTex = makeFacade();
     lprog = program(V_LINE, F_LINE);
     for (const u of ['uVP', 'uFogN', 'uFogF', 'uAlpha', 'uCol']) lloc[u] = gl.getUniformLocation(lprog, u);
     lloc.aPos = gl.getAttribLocation(lprog, 'aPos');
@@ -148,20 +176,23 @@ function resize() {
 function buf(arr) { const b = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, b);
     gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(arr), gl.STATIC_DRAW); return b; }
 
-function extrude(poly, h, V) {                  // walls + a centroid-fan roof, with normals
-    const n = poly.length;
+function extrude(poly, h, V) {       // walls (windowed) + a centroid-fan roof, pos+nrm+uv
+    const n = poly.length, floors = Math.max(1, h / 3.3);
     let cx = 0, cz = 0; for (const p of poly) { cx += p[0]; cz += p[1]; } cx /= n; cz /= n;
     for (let i = 0; i < n; i++) {
         const a = poly[i], b = poly[(i + 1) % n];
         const ex = b[0] - a[0], ez = b[1] - a[1];
-        let nx = ez, nz = -ex; const L = Math.hypot(nx, nz) || 1; nx /= L; nz /= L;
-        // two triangles for the wall quad (a0)-(b0)-(bH)-(aH)
-        const w = [[a[0], 0, a[1]], [b[0], 0, b[1]], [b[0], h, b[1]], [a[0], h, a[1]]];
+        const len = Math.hypot(ex, ez) || 1;
+        let nx = ez / len, nz = -ex / len;
+        const bays = Math.max(1, Math.round(len / 4));         // ~4m per window bay
+        // wall quad a0-b0-bH-aH, uv tiles by bays across and floors up
+        const w = [[a[0], 0, a[1], 0, 0], [b[0], 0, b[1], bays, 0],
+                   [b[0], h, b[1], bays, floors], [a[0], h, a[1], 0, floors]];
         for (const t of [[0, 1, 2], [0, 2, 3]]) for (const k of t) {
-            V.push(w[k][0], w[k][1], w[k][2], nx, 0, nz);
+            V.push(w[k][0], w[k][1], w[k][2], nx, 0, nz, w[k][3], w[k][4]);
         }
-        // roof triangle (centroid, a, b)
-        V.push(cx, h, cz, 0, 1, 0, a[0], h, a[1], 0, 1, 0, b[0], h, b[1], 0, 1, 0);
+        // roof triangle (uv.x=-1 marks it as roof, not façade)
+        V.push(cx, h, cz, 0, 1, 0, -1, -1, a[0], h, a[1], 0, 1, 0, -1, -1, b[0], h, b[1], 0, 1, 0, -1, -1);
     }
 }
 
@@ -169,8 +200,8 @@ function buildWorld(w) {
     S.foot = []; S.meCentroid = [0, 0]; S.meH = 10; ghost = null;
     // ground: a big plane out to the horizon, beneath the imagery
     const R = Math.max((w.radius || 320) * 1.6, 4000);
-    ground = buf([-R, 0, -R, 0, 1, 0, R, 0, -R, 0, 1, 0, R, 0, R, 0, 1, 0,
-                  -R, 0, -R, 0, 1, 0, R, 0, R, 0, 1, 0, -R, 0, R, 0, 1, 0]);
+    ground = buf([-R, 0, -R, 0, 1, 0, -1, -1, R, 0, -R, 0, 1, 0, -1, -1, R, 0, R, 0, 1, 0, -1, -1,
+                  -R, 0, -R, 0, 1, 0, -1, -1, R, 0, R, 0, 1, 0, -1, -1, -R, 0, R, 0, 1, 0, -1, -1]);
     // solid buildings (everything but the lost thing) merged into one mesh
     const V = [];
     const edges = [];                            // the lost building, as a wireframe ghost
@@ -190,7 +221,7 @@ function buildWorld(w) {
             S.foot.push(b.p);
         }
     }
-    bld = { b: buf(V), n: V.length / 6 };
+    bld = { b: buf(V), n: V.length / 8 };
     ghost = edges.length ? { b: buf(edges), n: edges.length / 3 } : null;
     // roads as faint ground lines
     const L = [];
@@ -205,7 +236,7 @@ function buildWorld(w) {
 function loadSatellite(lat, lon) {
     sat = [];
     if (lat == null || lon == null) return;
-    const z = 17, n = Math.pow(2, z), R = 5;
+    const z = 17, n = Math.pow(2, z), R = 4;
     const cxf = (lon + 180) / 360 * n;
     const rl = lat * Math.PI / 180;
     const cyf = (1 - Math.log(Math.tan(rl) + 1 / Math.cos(rl)) / Math.PI) / 2 * n;
@@ -270,9 +301,9 @@ function openChamber(payload, ghostRec) {
     const nb = (world.buildings || []).length;
     S.sub = `standing where it stood · ${nb} real buildings · real aerial ground`;
     const c = S.meCentroid || [0, 0];
-    // begin high over the site, looking down like an eye arriving from orbit
-    S.pos = [c[0], 165, c[1] + 165]; S.yaw = Math.PI; S.pitch = -0.62; S.vy = 0; S.t = 0;
-    if (/(^|&)rc=3(&|$)/.test(location.hash)) { S.pos = [c[0], 48, c[1] + 150]; S.pitch = -0.05; }
+    // arrive low over the city, looking across it, then settle to the street to walk
+    S.pos = [c[0], 52, c[1] + 105]; S.yaw = Math.PI; S.pitch = -0.33; S.vy = 0; S.t = 0;
+    if (/(^|&)rc=3(&|$)/.test(location.hash)) { S.pos = [c[0], 220, c[1] + 220]; S.pitch = -0.6; }
     S.keys = Object.create(null); S.vel = [0, 0, 0];
     S.active = true; window.__chamberActive = true;
     cv.classList.add('active'); hud.classList.add('active'); updateHud();
@@ -285,7 +316,7 @@ function escapeHTML(s) { return ('' + (s == null ? '' : s)).replace(/[&<>"]/g, c
 function updateHud() {
     hud.innerHTML = `<div class="ch-title">${escapeHTML(S.title)}</div>` +
         `<div class="ch-sub">${escapeHTML(S.sub)}</div>` +
-        `<div class="ch-hint">W A S D to fly · space / shift up & down · drag to look · esc to leave</div>`;
+        `<div class="ch-hint">W A S D to walk · drag to look · hold space to rise & fly · esc to leave</div>`;
 }
 function lookDir() { const cp = Math.cos(S.pitch); return [cp * Math.sin(S.yaw), Math.sin(S.pitch), cp * Math.cos(S.yaw)]; }
 
@@ -307,21 +338,28 @@ function frame() {
     const asp = cv.width / cv.height;
     const proj = perspective(60 * Math.PI / 180, asp, 0.5, 9000);
 
-    // FREE FLIGHT over the real world: move where you look, rise and sink, and
-    // move faster the higher you are --- fast over the city, gentle at the street.
+    // WALK the streets: heading from yaw (looking up never lifts your feet), with
+    // gravity and building collision. Hold space to rise and fly for the overview,
+    // let go and you fall back to the ground --- walk down there, fly up here.
+    const fwd = [Math.sin(S.yaw), 0, Math.cos(S.yaw)], rgt = [Math.cos(S.yaw), 0, -Math.sin(S.yaw)];
+    const flying = S.pos[1] > EYE + 0.5;
+    const a = flying ? 0.004 * S.pos[1] : 0.05, k = S.keys, acc = [0, 0];
+    if (k['w'] || k['arrowup']) { acc[0] += fwd[0] * a; acc[1] += fwd[2] * a; }
+    if (k['s'] || k['arrowdown']) { acc[0] -= fwd[0] * a; acc[1] -= fwd[2] * a; }
+    if (k['d'] || k['arrowright']) { acc[0] += rgt[0] * a; acc[1] += rgt[2] * a; }
+    if (k['a'] || k['arrowleft']) { acc[0] -= rgt[0] * a; acc[1] -= rgt[2] * a; }
+    S.vel = [(S.vel[0] + acc[0]) * 0.82, 0, (S.vel[2] + acc[1]) * 0.82];
+    let nx = S.pos[0] + S.vel[0], nz = S.pos[2] + S.vel[2];
+    if (flying || !inBuilding(nx, S.pos[2])) S.pos[0] = nx; else S.vel[0] = 0;
+    if (flying || !inBuilding(S.pos[0], nz)) S.pos[2] = nz; else S.vel[2] = 0;
+    // vertical: space rises, shift sinks, gravity pulls back to the street
+    if (k[' '] || k['e']) S.vy += 0.045;
+    else if (k['shift'] || k['q'] || k['c']) S.vy -= 0.06;
+    else S.vy -= GRAV;
+    S.pos[1] += S.vy; S.vy *= 0.86;
+    if (S.pos[1] <= EYE) { S.pos[1] = EYE; S.vy = 0; }
+    if (S.pos[1] > 600) { S.pos[1] = 600; S.vy = 0; }
     const f = lookDir();
-    const rgt = nrm(crs(f, [0, 1, 0]));
-    const sp = 0.01 * Math.max(7, S.pos[1]);
-    const k = S.keys, acc = [0, 0, 0];
-    const add = (v, s) => { acc[0] += v[0] * s; acc[1] += v[1] * s; acc[2] += v[2] * s; };
-    if (k['w'] || k['arrowup']) add(f, sp);
-    if (k['s'] || k['arrowdown']) add(f, -sp);
-    if (k['d'] || k['arrowright']) add(rgt, sp);
-    if (k['a'] || k['arrowleft']) add(rgt, -sp);
-    if (k[' '] || k['e']) acc[1] += sp;
-    if (k['shift'] || k['q'] || k['c']) acc[1] -= sp;
-    S.vel = [(S.vel[0] + acc[0]) * 0.85, (S.vel[1] + acc[1]) * 0.85, (S.vel[2] + acc[2]) * 0.85];
-    S.pos = [S.pos[0] + S.vel[0], Math.max(1.6, S.pos[1] + S.vel[1]), S.pos[2] + S.vel[2]];
     const view = lookAt(S.pos, [S.pos[0] + f[0], S.pos[1] + f[1], S.pos[2] + f[2]], [0, 1, 0]);
     const vp = mul(proj, view); S.vp = vp;
     const sun = nrm([0.5, 0.55, 0.35]);
@@ -343,15 +381,16 @@ function frame() {
     gl.useProgram(wloc.p);
     gl.uniformMatrix4fv(wloc.uVP, false, vp);
     gl.uniform3fv(wloc.uSun, sun); gl.uniform1f(wloc.uFogN, fogN); gl.uniform1f(wloc.uFogF, fogF);
-    gl.uniform1f(wloc.uAmb, 0.5);
-    const drawWorld = (b, n, base) => {
-        gl.uniform3fv(wloc.uBase, base);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, facadeTex); gl.uniform1i(wloc.uTex, 0);
+    const drawWorld = (b, n, base, textured) => {
+        gl.uniform3fv(wloc.uBase, base); gl.uniform1f(wloc.uTextured, textured ? 1 : 0);
         gl.bindBuffer(gl.ARRAY_BUFFER, b);
-        gl.enableVertexAttribArray(wloc.aPos); gl.vertexAttribPointer(wloc.aPos, 3, gl.FLOAT, false, 24, 0);
-        gl.enableVertexAttribArray(wloc.aNrm); gl.vertexAttribPointer(wloc.aNrm, 3, gl.FLOAT, false, 24, 12);
+        gl.enableVertexAttribArray(wloc.aPos); gl.vertexAttribPointer(wloc.aPos, 3, gl.FLOAT, false, 32, 0);
+        gl.enableVertexAttribArray(wloc.aNrm); gl.vertexAttribPointer(wloc.aNrm, 3, gl.FLOAT, false, 32, 12);
+        gl.enableVertexAttribArray(wloc.aUV); gl.vertexAttribPointer(wloc.aUV, 2, gl.FLOAT, false, 32, 24);
         gl.drawArrays(gl.TRIANGLES, 0, n);
     };
-    drawWorld(ground, 6, [0.06, 0.056, 0.045]);          // dark base beneath the imagery
+    drawWorld(ground, 6, [0.06, 0.056, 0.045], 0);       // dark base beneath the imagery
     // the real aerial ground, tile by tile
     if (sat.length) {
         gl.useProgram(tgprog); gl.uniformMatrix4fv(tgloc.uVP, false, vp);
@@ -364,7 +403,7 @@ function frame() {
             gl.uniform1f(tgloc.uSize, t.size); gl.bindTexture(gl.TEXTURE_2D, t.ready ? t.tex : sootTex);
             gl.drawElements(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0); }
     }
-    if (bld) drawWorld(bld.b, bld.n, [0.24, 0.22, 0.19]);
+    if (bld) drawWorld(bld.b, bld.n, [1, 1, 1], 1);      // real buildings, windowed façades
 
     // roads
     if (lines) { gl.useProgram(lprog); gl.uniformMatrix4fv(lloc.uVP, false, vp);
