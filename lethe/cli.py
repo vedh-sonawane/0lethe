@@ -10,6 +10,7 @@
     python -m lethe.cli library [limit]           rebuild works humanity knows it lost (the Ghost Library)
     python -m lethe.cli recognize [n]             find lost lines surviving inside surviving books
     python -m lethe.cli views [n]                 recompose any lost thing from its surviving images
+    python -m lethe.cli world [n]                 bake the real walkable world around a lost place
     python -m lethe.cli show   <ghost-id>          print a reconstruction + its trail
     python -m lethe.cli ghosts                     the most-referenced missing things (convergence)
     python -m lethe.cli rebuild <url>              rebuild a copy-less page from its inbound shadows
@@ -25,7 +26,7 @@ import sys
 
 from . import db
 from .case import (discover_from_wikipedia, foresee_wikipedia, gather_views,
-                   hunt_geocities, recognize_fragments, recover_lost_texts,
+                   gather_world, hunt_geocities, recognize_fragments, recover_lost_texts,
                    recover_lost_works, recover_structures, reconstruct_text, run_case)
 
 _STATUS_MARK = {"recovered": "+", "inferred": "~", "missing": "-"}
@@ -123,6 +124,8 @@ def main(argv: list[str]) -> int:
             recognize_fragments(conn, limit_ghosts=int(argv[2]) if len(argv) >= 3 else 10)
         elif cmd == "views":
             gather_views(conn, limit_ghosts=int(argv[2]) if len(argv) >= 3 else 8)
+        elif cmd == "world":
+            gather_world(conn, limit_ghosts=int(argv[2]) if len(argv) >= 3 else 6)
         elif cmd == "text":
             if len(argv) >= 4 and argv[3].lstrip("-").isdigit():
                 reconstruct_text(conn, argv[2], float(argv[3]))

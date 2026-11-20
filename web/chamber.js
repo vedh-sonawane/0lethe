@@ -1,491 +1,338 @@
 // ===========================================================================
-// THE RECONSTRUCTION CHAMBER --- real 3D, hand-written in raw WebGL.
-// No library. No Three.js. No engine. Every matrix, every shader, written here.
+// THE WORLD --- a real, accurate 3D world you walk, built from real map data.
+// Raw WebGL, hand-written: no Three.js, no engine, no library.
 //
-// A lost thing recomposed from every surviving eye: its surviving photographs
-// suspended as planes in a true 3D volume of soot, each at the viewpoint it was
-// taken from. Fly in and the thing surrounds you in the dark. Each plate is
-// inscribed in the order it was taken --- you watch the thing be seen across the
-// years. Light only where evidence survived; everywhere else, soot.
+// For any lost thing that had a place, the machine bakes the real geometry of
+// that exact spot from OpenStreetMap --- actual building footprints and heights,
+// streets, water --- and this stands it up as a solid, sun-lit world you explore
+// on foot, with gravity. The lost thing itself rises where it really stood, a
+// luminous wireframe wearing the photographs that survived it. Everything solid
+// is real survey; nothing is invented.
 // ===========================================================================
 (function () {
 'use strict';
 const cv = document.getElementById('chamber');
 const hud = document.getElementById('chamberhud');
-let gl = null, prog = null, loc = {}, quadBuf = null, idxBuf = null, ready = false;
+let gl = null, world = null, lprog = null, pprog = null, lloc = {}, ploc = {}, wloc = {};
+let ground = null, bld = null, lines = null, ghost = null, photos = [];
+let quadBuf = null, idxBuf = null, sootTex = null, ready = false;
 
+const EYE = 1.7, GRAV = 0.025, JUMP = 0.42;
 const S = {
-    active: false, views: [], title: '', sub: '',
-    // a true first-person flyer: a position in the world and where it's looking.
-    pos: [0, 0, 13], yaw: 0, pitch: 0,
-    vel: [0, 0, 0],                         // eased motion, so flight feels weighted
-    keys: Object.create(null),              // WASD / space / shift held right now
-    tgt: null,                              // optional glide target (set by clicking an eye)
-    dragging: false, lx: 0, ly: 0, moved: 0,
-    t: 0, raf: 0, pid: null, enterIdx: -1,
+    active: false, title: '', sub: '',
+    pos: [0, EYE, 36], yaw: Math.PI, pitch: -0.02, vel: [0, 0, 0], vy: 0, grounded: true,
+    keys: Object.create(null), dragging: false, lx: 0, ly: 0, moved: 0, t: 0, raf: 0,
+    foot: [],                                   // building footprints, for collision
 };
 
-// ---- minimal column-major mat4 (no gl-matrix) -----------------------------
-function perspective(fovy, aspect, near, far) {
-    const f = 1 / Math.tan(fovy / 2), nf = 1 / (near - far);
-    return [f / aspect, 0, 0, 0, 0, f, 0, 0,
-            0, 0, (far + near) * nf, -1, 0, 0, 2 * far * near * nf, 0];
-}
-function mul(a, b) {
-    const o = new Array(16);
-    for (let c = 0; c < 4; c++) for (let r = 0; r < 4; r++) {
-        let s = 0;
-        for (let k = 0; k < 4; k++) s += a[k * 4 + r] * b[c * 4 + k];
-        o[c * 4 + r] = s;
-    }
-    return o;
-}
-function lookAt(eye, ctr, up) {
-    let z = norm(sub(eye, ctr));
-    let x = norm(cross(up, z));
-    let y = cross(z, x);
+// ---- mat4 (column-major) --------------------------------------------------
+function perspective(f, a, n, fr) { const t = 1 / Math.tan(f / 2), d = 1 / (n - fr);
+    return [t / a, 0, 0, 0, 0, t, 0, 0, 0, 0, (fr + n) * d, -1, 0, 0, 2 * fr * n * d, 0]; }
+function mul(a, b) { const o = new Array(16);
+    for (let c = 0; c < 4; c++) for (let r = 0; r < 4; r++) { let s = 0;
+        for (let k = 0; k < 4; k++) s += a[k * 4 + r] * b[c * 4 + k]; o[c * 4 + r] = s; } return o; }
+function lookAt(e, c, up) { let z = nrm(sub(e, c)), x = nrm(crs(up, z)), y = crs(z, x);
     return [x[0], y[0], z[0], 0, x[1], y[1], z[1], 0, x[2], y[2], z[2], 0,
-            -dot(x, eye), -dot(y, eye), -dot(z, eye), 1];
-}
+            -dot(x, e), -dot(y, e), -dot(z, e), 1]; }
 const sub = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
 const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
-const cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
-function norm(v) { const l = Math.hypot(v[0], v[1], v[2]) || 1; return [v[0] / l, v[1] / l, v[2] / l]; }
-
-// a plane model matrix: a quad placed at pos, facing outward from the centre,
-// scaled to the photo's shape --- a window the thing was seen through.
-function planeModel(pos, w, h) {
-    const n = norm(pos);
-    let r = cross([0, 1, 0], n);
-    if (Math.hypot(r[0], r[1], r[2]) < 1e-4) r = [1, 0, 0];
-    r = norm(r);
-    const u = cross(n, r);
-    return [r[0] * w, r[1] * w, r[2] * w, 0,
-            u[0] * h, u[1] * h, u[2] * h, 0,
-            n[0], n[1], n[2], 0,
-            pos[0], pos[1], pos[2], 1];
-}
+const crs = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+function nrm(v) { const l = Math.hypot(v[0], v[1], v[2]) || 1; return [v[0] / l, v[1] / l, v[2] / l]; }
 
 // ---- shaders --------------------------------------------------------------
-const VERT = `
-attribute vec2 aPos; attribute vec2 aUV;
-uniform mat4 uMVP; uniform mat4 uMV;
+const V_WORLD = `attribute vec3 aPos; attribute vec3 aNrm;
+uniform mat4 uVP; varying vec3 vN; varying float vZ; varying float vY;
+void main(){ gl_Position = uVP*vec4(aPos,1.0); vN=aNrm; vZ=gl_Position.w; vY=aPos.y; }`;
+const F_WORLD = `precision mediump float;
+uniform vec3 uSun; uniform vec3 uBase; uniform float uFogN,uFogF; uniform float uAmb;
+varying vec3 vN; varying float vZ; varying float vY;
+const vec3 soot=vec3(0.028,0.024,0.019);
+void main(){
+  vec3 n=normalize(vN);
+  float l=max(dot(n,uSun),0.0);
+  float sky=clamp(n.y*0.5+0.5,0.0,1.0);
+  float lum = 0.42 + 0.95*l + 0.30*sky;                    // ambient floor + low sun + skylight
+  vec3 col=uBase*lum;
+  col+=vec3(0.05,0.035,0.02)*l*clamp(vY*0.03,0.0,1.0);     // sunlit upper storeys warm
+  float fog=clamp((vZ-uFogN)/(uFogF-uFogN),0.0,1.0);
+  gl_FragColor=vec4(mix(col,soot,fog),1.0);
+}`;
+const V_LINE = `attribute vec3 aPos; uniform mat4 uVP; varying float vZ;
+void main(){ gl_Position=uVP*vec4(aPos,1.0); vZ=gl_Position.w; }`;
+const F_LINE = `precision mediump float; uniform float uFogN,uFogF,uAlpha; uniform vec3 uCol;
+varying float vZ; const vec3 soot=vec3(0.028,0.024,0.019);
+void main(){ float fog=clamp((vZ-uFogN)/(uFogF-uFogN),0.0,1.0);
+  gl_FragColor=vec4(mix(uCol,soot,fog), uAlpha*(1.0-fog)); }`;
+const V_PH = `attribute vec2 aPos; attribute vec2 aUV; uniform mat4 uMVP,uMV;
 varying vec2 vUV; varying float vZ;
-void main(){
-  vUV = aUV;
-  vec4 mv = uMV * vec4(aPos, 0.0, 1.0);
-  vZ = -mv.z;                    // view-space distance, for fog into soot
-  gl_Position = uMVP * vec4(aPos, 0.0, 1.0);
-}`;
-const FRAG = `
-precision mediump float;
-uniform sampler2D uTex; uniform float uAlpha; uniform float uMode;
-uniform float uFogN; uniform float uFogF;
-varying vec2 vUV; varying float vZ;
-const vec3 soot = vec3(0.024, 0.020, 0.016);
-void main(){
-  float fog = clamp((vZ - uFogN) / (uFogF - uFogN), 0.0, 1.0);
-  if (uMode > 0.5) {            // scratched frame: white line fading with depth
-    gl_FragColor = vec4(mix(vec3(0.95,0.93,0.87), soot, fog*0.85),
-                        uAlpha * (1.0 - fog*0.8));
-    return;
-  }
-  vec4 c = texture2D(uTex, vUV);
-  float lum = dot(c.rgb, vec3(0.299,0.587,0.114));
-  vec3 col = mix(c.rgb, vec3(lum), fog*0.6);         // desaturate into the dark
-  col = mix(col, soot, fog*0.8);                     // sink toward soot with depth
-  col *= mix(1.1, 0.6, fog);                         // nearer plates brighter
-  // a faint vignette on each plate, like a developed negative
-  vec2 d = vUV - 0.5;
-  col *= 1.0 - dot(d,d)*0.5;
-  gl_FragColor = vec4(col, uAlpha * (1.0 - fog*0.35));   // back plates stay ghostly
-}`;
+void main(){ vUV=aUV; vZ=-(uMV*vec4(aPos,0.0,1.0)).z; gl_Position=uMVP*vec4(aPos,0.0,1.0); }`;
+const F_PH = `precision mediump float; uniform sampler2D uTex; uniform float uAlpha,uMode,uFogN,uFogF;
+varying vec2 vUV; varying float vZ; const vec3 soot=vec3(0.028,0.024,0.019);
+void main(){ float fog=clamp((vZ-uFogN)/(uFogF-uFogN),0.0,1.0);
+  if(uMode>0.5){ gl_FragColor=vec4(mix(vec3(0.95,0.93,0.86),soot,fog*0.8),uAlpha*(1.0-fog*0.8)); return; }
+  vec4 c=texture2D(uTex,vUV); vec3 col=mix(c.rgb,soot,fog*0.85);
+  gl_FragColor=vec4(col, uAlpha*(1.0-fog*0.5)); }`;
 
-// a second tiny program for 3D lines in world space: the ground grid, and any
-// scratched structure. white scratch fading into soot with distance.
-const VERT_L = `
-attribute vec3 aP; uniform mat4 uVP; varying float vZ;
-void main(){ gl_Position = uVP * vec4(aP, 1.0); vZ = gl_Position.w; }`;
-const FRAG_L = `
-precision mediump float;
-uniform float uAlpha; uniform float uFogN; uniform float uFogF; uniform vec3 uCol;
-varying float vZ;
-void main(){
-  float fog = clamp((vZ - uFogN) / (uFogF - uFogN), 0.0, 1.0);
-  gl_FragColor = vec4(mix(uCol, vec3(0.024,0.02,0.016), fog), uAlpha * (1.0 - fog));
-}`;
-let lprog = null, lloc = {};
-
-function compile(type, src) {
-    const s = gl.createShader(type);
-    gl.shaderSource(s, src); gl.compileShader(s);
-    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS))
-        console.warn('shader', gl.getShaderInfoLog(s));
-    return s;
-}
+function sh(t, s) { const o = gl.createShader(t); gl.shaderSource(o, s); gl.compileShader(o);
+    if (!gl.getShaderParameter(o, gl.COMPILE_STATUS)) console.warn(gl.getShaderInfoLog(o)); return o; }
+function program(vs, fs) { const p = gl.createProgram();
+    gl.attachShader(p, sh(gl.VERTEX_SHADER, vs)); gl.attachShader(p, sh(gl.FRAGMENT_SHADER, fs));
+    gl.linkProgram(p); return p; }
 
 function initGL() {
-    gl = cv.getContext('webgl', { alpha: true, antialias: true, premultipliedAlpha: false });
-    if (!gl) { console.warn('no webgl'); return false; }
-    prog = gl.createProgram();
-    gl.attachShader(prog, compile(gl.VERTEX_SHADER, VERT));
-    gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, FRAG));
-    gl.linkProgram(prog); gl.useProgram(prog);
-    for (const u of ['uMVP', 'uMV', 'uTex', 'uAlpha', 'uMode', 'uFogN', 'uFogF'])
-        loc[u] = gl.getUniformLocation(prog, u);
-    loc.aPos = gl.getAttribLocation(prog, 'aPos');
-    loc.aUV = gl.getAttribLocation(prog, 'aUV');
-    // a unit quad: corners + UVs (v flipped so photos stand upright)
-    quadBuf = gl.createBuffer();
-    gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf);
-    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([
-        -0.5, -0.5, 0, 1,  0.5, -0.5, 1, 1,  0.5, 0.5, 1, 0,  -0.5, 0.5, 0, 0]),
-        gl.STATIC_DRAW);
-    idxBuf = gl.createBuffer();
-    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, idxBuf);
+    gl = cv.getContext('webgl', { alpha: true, antialias: true, depth: true });
+    if (!gl) return false;
+    wloc.p = program(V_WORLD, F_WORLD);
+    for (const u of ['uVP', 'uSun', 'uBase', 'uFogN', 'uFogF', 'uAmb']) wloc[u] = gl.getUniformLocation(wloc.p, u);
+    wloc.aPos = gl.getAttribLocation(wloc.p, 'aPos'); wloc.aNrm = gl.getAttribLocation(wloc.p, 'aNrm');
+    lprog = program(V_LINE, F_LINE);
+    for (const u of ['uVP', 'uFogN', 'uFogF', 'uAlpha', 'uCol']) lloc[u] = gl.getUniformLocation(lprog, u);
+    lloc.aPos = gl.getAttribLocation(lprog, 'aPos');
+    pprog = program(V_PH, F_PH);
+    for (const u of ['uMVP', 'uMV', 'uTex', 'uAlpha', 'uMode', 'uFogN', 'uFogF']) ploc[u] = gl.getUniformLocation(pprog, u);
+    ploc.aPos = gl.getAttribLocation(pprog, 'aPos'); ploc.aUV = gl.getAttribLocation(pprog, 'aUV');
+    quadBuf = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-0.5, -0.5, 0, 1, 0.5, -0.5, 1, 1, 0.5, 0.5, 1, 0, -0.5, 0.5, 0, 0]), gl.STATIC_DRAW);
+    idxBuf = gl.createBuffer(); gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, idxBuf);
     gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array([0, 1, 2, 2, 3, 0]), gl.STATIC_DRAW);
-    // the 3D line program (ground grid, structure)
-    lprog = gl.createProgram();
-    gl.attachShader(lprog, compile(gl.VERTEX_SHADER, VERT_L));
-    gl.attachShader(lprog, compile(gl.FRAGMENT_SHADER, FRAG_L));
-    gl.linkProgram(lprog);
-    for (const u of ['uVP', 'uAlpha', 'uFogN', 'uFogF', 'uCol'])
-        lloc[u] = gl.getUniformLocation(lprog, u);
-    lloc.aP = gl.getAttribLocation(lprog, 'aP');
-    buildGrid();
-    gl.enable(gl.BLEND);
-    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
-    ready = true;
-    return true;
+    sootTex = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, sootTex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array([12, 10, 8, 255]));
+    gl.enable(gl.DEPTH_TEST); gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    ready = true; return true;
 }
 
 function resize() {
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
-    cv.width = Math.floor(innerWidth * dpr);
-    cv.height = Math.floor(innerHeight * dpr);
+    cv.width = Math.floor(innerWidth * dpr); cv.height = Math.floor(innerHeight * dpr);
     cv.style.width = innerWidth + 'px'; cv.style.height = innerHeight + 'px';
     if (gl) gl.viewport(0, 0, cv.width, cv.height);
 }
 
-// a 1x1 soot texture to bind while a plate's real photo is still loading
-let sootTex = null;
-function makeSootTex() {
-    sootTex = gl.createTexture();
-    gl.bindTexture(gl.TEXTURE_2D, sootTex);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE,
-                  new Uint8Array([10, 8, 6, 255]));
-}
-function loadTex(view) {
-    const tex = gl.createTexture();
-    gl.bindTexture(gl.TEXTURE_2D, tex);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE,
-                  new Uint8Array([10, 8, 6, 255]));
-    const img = new Image();
-    img.crossOrigin = 'anonymous';           // upload.wikimedia.org sends CORS *
-    img.onload = () => {
-        gl.bindTexture(gl.TEXTURE_2D, tex);
-        gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
-        try {
-            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, img);
-            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-            view.aspect = img.naturalWidth / img.naturalHeight || 1;
-            view.ready = true;
-        } catch (e) { /* tainted or failed: stays soot */ }
-    };
-    img.src = view.thumb;
-    return tex;
-}
+// ---- build the world's geometry from the baked map ------------------------
+function buf(arr) { const b = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, b);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(arr), gl.STATIC_DRAW); return b; }
 
-// when you step into an eye, pull the FULL-resolution surviving photograph ---
-// not a thumbnail. you are then looking at the actual thing, through the actual
-// lens that saw it: no model, no reconstruction, the real bytes.
-function loadFull(view) {
-    if (view.fullReq || !view.url) return;
-    view.fullReq = true;
-    const img = new Image();
-    img.crossOrigin = 'anonymous';
-    img.onload = () => {
-        const tex = gl.createTexture();
-        gl.bindTexture(gl.TEXTURE_2D, tex);
-        gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
-        try {
-            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, img);
-            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-            view.fullTex = tex; view.aspect = img.naturalWidth / img.naturalHeight || view.aspect;
-        } catch (e) { /* keep the thumb */ }
-    };
-    img.src = view.url;
-}
-
-// the ground you walk on: a scratched grid at eye-zero, running out to a soot
-// horizon --- the real floor of the place, an instrument's deck.
-const EYE = 1.7;                                 // human eye height, ~metres
-let gridBuf = null, gridN = 0;
-function buildGrid() {
-    const v = [], R = 70, step = 4, y = 0;
-    for (let i = -R; i <= R; i += step) {
-        v.push(-R, y, i, R, y, i, i, y, -R, i, y, R);
+function extrude(poly, h, V) {                  // walls + a centroid-fan roof, with normals
+    const n = poly.length;
+    let cx = 0, cz = 0; for (const p of poly) { cx += p[0]; cz += p[1]; } cx /= n; cz /= n;
+    for (let i = 0; i < n; i++) {
+        const a = poly[i], b = poly[(i + 1) % n];
+        const ex = b[0] - a[0], ez = b[1] - a[1];
+        let nx = ez, nz = -ex; const L = Math.hypot(nx, nz) || 1; nx /= L; nz /= L;
+        // two triangles for the wall quad (a0)-(b0)-(bH)-(aH)
+        const w = [[a[0], 0, a[1]], [b[0], 0, b[1]], [b[0], h, b[1]], [a[0], h, a[1]]];
+        for (const t of [[0, 1, 2], [0, 2, 3]]) for (const k of t) {
+            V.push(w[k][0], w[k][1], w[k][2], nx, 0, nz);
+        }
+        // roof triangle (centroid, a, b)
+        V.push(cx, h, cz, 0, 1, 0, a[0], h, a[1], 0, 1, 0, b[0], h, b[1], 0, 1, 0);
     }
-    gridN = v.length / 3;
-    gridBuf = gl.createBuffer();
-    gl.bindBuffer(gl.ARRAY_BUFFER, gridBuf);
-    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(v), gl.STATIC_DRAW);
 }
 
-// an upright panel standing on the ground, facing a direction. a real-scale
-// surface of the place --- a surviving photograph, where the thing was seen.
-function uprightModel(c, w, h, face) {
-    const s = Math.sin(face), co = Math.cos(face);
-    return [co * w, 0, -s * w, 0,   0, h, 0, 0,   s, 0, co, 0,   c[0], c[1], c[2], 1];
+function buildWorld(w) {
+    S.foot = []; S.meCentroid = [0, 0]; S.meH = 10; ghost = null;
+    // ground: a big lit plane
+    const R = (w.radius || 320) * 1.6;
+    ground = buf([-R, 0, -R, 0, 1, 0, R, 0, -R, 0, 1, 0, R, 0, R, 0, 1, 0,
+                  -R, 0, -R, 0, 1, 0, R, 0, R, 0, 1, 0, -R, 0, R, 0, 1, 0]);
+    // solid buildings (everything but the lost thing) merged into one mesh
+    const V = [];
+    const edges = [];                            // the lost building, as a wireframe ghost
+    for (const b of (w.buildings || [])) {
+        const h = b.h > 0 ? b.h : 8.5;
+        if (b.me) {
+            for (let i = 0; i < b.p.length; i++) {
+                const a = b.p[i], c = b.p[(i + 1) % b.p.length];
+                edges.push(a[0], 0, a[1], a[0], h, a[1]);        // vertical
+                edges.push(a[0], h, a[1], c[0], h, c[1]);        // roofline
+                edges.push(a[0], 0, a[1], c[0], 0, c[1]);        // base
+            }
+            S.meCentroid = b.p.reduce((s, p) => [s[0] + p[0], s[1] + p[1]], [0, 0]).map(x => x / b.p.length);
+            S.meH = h;
+        } else {
+            extrude(b.p, h, V);
+            S.foot.push(b.p);
+        }
+    }
+    bld = { b: buf(V), n: V.length / 6 };
+    ghost = edges.length ? { b: buf(edges), n: edges.length / 3 } : null;
+    // roads as faint ground lines
+    const L = [];
+    for (const r of (w.roads || [])) for (let i = 0; i < r.length - 1; i++)
+        L.push(r[i][0], 0.1, r[i][1], r[i + 1][0], 0.1, r[i + 1][1]);
+    lines = L.length ? { b: buf(L), n: L.length / 3 } : null;
 }
 
-// lay the surviving views across the real ground as upright, real-scale panels,
-// spiralling out from where the thing stood, all facing inward --- so you walk in
-// among them and the place half-stands around you. Everything between is soot.
-function placeViews() {
-    const n = S.views.length, GOLD = Math.PI * (1 + Math.sqrt(5));
-    S.views.forEach((v, i) => {
-        v.aspect = v.aspect || 1.4;
-        const h = 8.5;                            // ~8.5m tall, real building scale
-        const w = h * v.aspect;
-        const k = i + 0.5;
-        const rad = 6 + Math.sqrt(k / n) * 26;    // a street spiralling outward
-        const ang = GOLD * k;
-        const cx = Math.cos(ang) * rad, cz = Math.sin(ang) * rad;
-        v.w = w; v.h = h;
-        v.pos = [cx, h / 2, cz];                  // bottom edge on the ground
-        v.face = Math.atan2(-cx, -cz);            // faces back toward where it stood
-        v.tex = loadTex(v);
-        v.reveal = i;
+// the surviving photographs, standing where the thing was --- its real skin,
+// clustered at its footprint so you meet them when you reach the site.
+function placePhotos(views) {
+    const c = S.meCentroid || [0, 0], h = S.meH || 10;
+    photos = views.map((v, i) => {
+        const o = { ...v, ready: false, tex: null };
+        const ang = i / Math.max(1, views.length) * Math.PI * 2;
+        const rad = 10 + (i % 3) * 3;
+        o.h = Math.min(h, 8); o.w = o.h * (v.aspect || 1.4);
+        o.pos = [c[0] + Math.cos(ang) * rad, o.h / 2, c[1] + Math.sin(ang) * rad];
+        o.face = Math.atan2(c[0] - o.pos[0], c[1] - o.pos[2]);
+        o.tex = loadTex(o);
+        return o;
     });
 }
+function loadTex(view) {
+    const tex = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array([12, 10, 8, 255]));
+    const img = new Image(); img.crossOrigin = 'anonymous';
+    img.onload = () => { gl.bindTexture(gl.TEXTURE_2D, tex);
+        try { gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, img);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+            view.aspect = img.naturalWidth / img.naturalHeight || view.aspect; view.ready = true;
+        } catch (e) {} };
+    img.src = view.thumb; return tex;
+}
 
-function year(d) { const m = ('' + (d || '')).match(/(-?\d{3,4})/); return m ? +m[1] : null; }
-
-function openChamber(viewsData, ghost) {
+// ---- open / close ---------------------------------------------------------
+function openChamber(payload, ghostRec) {
     if (!gl && !initGL()) return;
-    if (!sootTex) makeSootTex();
     resize();
-    // order by the year each was taken, so the thing is inscribed through time
-    S.views = viewsData.map(v => ({ ...v, y: year(v.date) }))
-        .sort((a, b) => (a.y == null) - (b.y == null) || (a.y || 0) - (b.y || 0));
-    placeViews();
-    S.title = (ghost && (ghost.label || ghost.identity)) || '';
-    const ys = S.views.map(v => v.y).filter(x => x != null);
-    const span = ys.length ? (Math.min(...ys) + (ys.length > 1 ? '–' + Math.max(...ys) : '')) : '';
-    S.sub = `${S.views.length} surviving eyes${span ? '   ·   ' + span : ''}`;
-    S.t = 0; S.enterIdx = -1; S.tgt = null; S.keys = Object.create(null); S.vel = [0, 0, 0];
-    // stand at the near edge of the place, at human height, looking in toward
-    // where the thing was, head tipped up to the standing views
-    S.pos = [0, EYE, 42]; S.yaw = Math.PI; S.pitch = 0.08; S.eye = S.pos;
+    world = payload.world || { buildings: [], roads: [], water: [], radius: 160 };
+    const views = payload.views || [];
+    buildWorld(world);
+    placePhotos(views);
+    S.title = (ghostRec && (ghostRec.label || ghostRec.identity)) || '';
+    const nb = (world.buildings || []).length;
+    S.sub = `standing where it stood · ${nb} real buildings · OpenStreetMap`;
+    const c = S.meCentroid || [0, 0];
+    S.pos = [c[0], EYE, c[1] + 46]; S.yaw = Math.PI; S.pitch = 0.05; S.vy = 0; S.t = 0;
+    S.keys = Object.create(null); S.vel = [0, 0, 0];
     S.active = true; window.__chamberActive = true;
-    cv.classList.add('active'); hud.classList.add('active');
-    updateHud();
-    cancelAnimationFrame(S.raf);
-    S.raf = requestAnimationFrame(frame);
-    if (/(^|&)rc=2(&|$)/.test(location.hash))        // dev: deep-link flying to one eye
-        setTimeout(() => { if (S.active) flyToView(0); }, 300);
+    cv.classList.add('active'); hud.classList.add('active'); updateHud();
+    cancelAnimationFrame(S.raf); S.raf = requestAnimationFrame(frame);
 }
-function closeChamber() {
-    S.active = false; window.__chamberActive = false;
-    cv.classList.remove('active'); hud.classList.remove('active');
-    cancelAnimationFrame(S.raf);
+function closeChamber() { S.active = false; window.__chamberActive = false;
+    cv.classList.remove('active'); hud.classList.remove('active'); cancelAnimationFrame(S.raf); }
+function escapeHTML(s) { return ('' + (s == null ? '' : s)).replace(/[&<>"]/g, c =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
+function updateHud() {
+    hud.innerHTML = `<div class="ch-title">${escapeHTML(S.title)}</div>` +
+        `<div class="ch-sub">${escapeHTML(S.sub)}</div>` +
+        `<div class="ch-hint">W A S D to walk · drag to look · space to jump · esc to leave</div>`;
 }
-function escapeHTML(s) {
-    return ('' + (s == null ? '' : s)).replace(/[&<>"]/g, c =>
-        ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
-}
+function lookDir() { const cp = Math.cos(S.pitch); return [cp * Math.sin(S.yaw), Math.sin(S.pitch), cp * Math.cos(S.yaw)]; }
 
-const lerp3 = (a, b, k) => [a[0] + (b[0] - a[0]) * k, a[1] + (b[1] - a[1]) * k, a[2] + (b[2] - a[2]) * k];
-
-function lookDir() {
-    const cp = Math.cos(S.pitch);
-    return [cp * Math.sin(S.yaw), Math.sin(S.pitch), cp * Math.cos(S.yaw)];
+function inBuilding(x, z) {
+    for (const poly of S.foot) {
+        let inside = false;
+        for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+            const xi = poly[i][0], zi = poly[i][1], xj = poly[j][0], zj = poly[j][1];
+            if (((zi > z) !== (zj > z)) && (x < (xj - xi) * (z - zi) / (zj - zi) + xi)) inside = !inside;
+        }
+        if (inside) return true;
+    }
+    return false;
 }
 
 function frame() {
     if (!S.active) return;
     S.t += 0.016;
     const asp = cv.width / cv.height;
-    const fovy = 62 * Math.PI / 180;
-    const proj = perspective(fovy, asp, 0.03, 240);
+    const proj = perspective(64 * Math.PI / 180, asp, 0.1, 900);
 
-    // walk on the ground: heading is yaw only, so looking up never lifts you off
-    // your feet. you travel the place; you don't fly over it.
-    const fwdH = [Math.sin(S.yaw), 0, Math.cos(S.yaw)];
-    const rightH = [Math.cos(S.yaw), 0, -Math.sin(S.yaw)];
+    // walk: heading from yaw only; gravity holds you to the ground
+    const fwd = [Math.sin(S.yaw), 0, Math.cos(S.yaw)], rgt = [Math.cos(S.yaw), 0, -Math.sin(S.yaw)];
+    const a = 0.055, k = S.keys, acc = [0, 0];
+    if (k['w'] || k['arrowup']) { acc[0] += fwd[0] * a; acc[1] += fwd[2] * a; }
+    if (k['s'] || k['arrowdown']) { acc[0] -= fwd[0] * a; acc[1] -= fwd[2] * a; }
+    if (k['d'] || k['arrowright']) { acc[0] += rgt[0] * a; acc[1] += rgt[2] * a; }
+    if (k['a'] || k['arrowleft']) { acc[0] -= rgt[0] * a; acc[1] -= rgt[2] * a; }
+    S.vel = [(S.vel[0] + acc[0]) * 0.8, 0, (S.vel[2] + acc[1]) * 0.8];
+    // horizontal move with simple building collision (slide: try x then z)
+    let nx = S.pos[0] + S.vel[0], nz = S.pos[2] + S.vel[2];
+    if (!inBuilding(nx, S.pos[2])) S.pos[0] = nx; else S.vel[0] = 0;
+    if (!inBuilding(S.pos[0], nz)) S.pos[2] = nz; else S.vel[2] = 0;
+    // gravity + jump
+    S.vy -= GRAV; S.pos[1] += S.vy;
+    if (S.pos[1] <= EYE) { S.pos[1] = EYE; S.vy = 0; S.grounded = true; } else S.grounded = false;
 
-    if (S.tgt) {
-        // walking up to a view you clicked, until you take the controls back
-        S.pos = lerp3(S.pos, S.tgt.pos, 0.08);
-        let dy = ((S.tgt.yaw - S.yaw + Math.PI * 3) % (Math.PI * 2)) - Math.PI;
-        S.yaw += dy * 0.1; S.pitch += (S.tgt.pitch - S.pitch) * 0.1;
-        const d = Math.hypot(S.pos[0] - S.tgt.pos[0], S.pos[1] - S.tgt.pos[1], S.pos[2] - S.tgt.pos[2]);
-        if (d < 0.05) S.tgt = null;
-    } else {
-        const a = 0.09, k = S.keys, acc = [0, 0, 0];
-        const add = (v, s) => { acc[0] += v[0] * s; acc[2] += v[2] * s; };
-        if (k['w'] || k['arrowup']) add(fwdH, a);
-        if (k['s'] || k['arrowdown']) add(fwdH, -a);
-        if (k['d'] || k['arrowright']) add(rightH, a);
-        if (k['a'] || k['arrowleft']) add(rightH, -a);
-        S.vel = [(S.vel[0] + acc[0]) * 0.82, 0, (S.vel[2] + acc[2]) * 0.82];
-        S.pos = [S.pos[0] + S.vel[0], S.pos[1], S.pos[2] + S.vel[2]];
-        S.pos[1] += (EYE - S.pos[1]) * 0.1;        // settle back to standing height
-    }
-    S.eye = S.pos;
-    const f2 = lookDir();
-    const view = lookAt(S.pos, [S.pos[0] + f2[0], S.pos[1] + f2[1], S.pos[2] + f2[2]], [0, 1, 0]);
-    const vp = mul(proj, view);
-    S.vp = vp;
+    const f = lookDir();
+    const view = lookAt(S.pos, [S.pos[0] + f[0], S.pos[1] + f[1], S.pos[2] + f[2]], [0, 1, 0]);
+    const vp = mul(proj, view); S.vp = vp;
+    const sun = nrm([0.5, 0.55, 0.35]);
 
+    // sky: clear to a dusk-soot; the horizon fog does the rest
     gl.viewport(0, 0, cv.width, cv.height);
-    gl.clearColor(0.024, 0.020, 0.016, 1);
-    gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.clearColor(0.05, 0.045, 0.038, 1); gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+    const fogN = 130, fogF = 1500;
 
-    // the ground grid --- a place to stand
-    gl.useProgram(lprog);
-    gl.uniformMatrix4fv(lloc.uVP, false, vp);
-    gl.uniform1f(lloc.uFogN, 10.0); gl.uniform1f(lloc.uFogF, 95.0);
-    gl.uniform1f(lloc.uAlpha, 0.15);
-    gl.uniform3f(lloc.uCol, 0.42, 0.40, 0.36);
-    gl.bindBuffer(gl.ARRAY_BUFFER, gridBuf);
-    gl.enableVertexAttribArray(lloc.aP);
-    gl.vertexAttribPointer(lloc.aP, 3, gl.FLOAT, false, 0, 0);
-    gl.drawArrays(gl.LINES, 0, gridN);
+    // ground + buildings, lit
+    gl.useProgram(wloc.p);
+    gl.uniformMatrix4fv(wloc.uVP, false, vp);
+    gl.uniform3fv(wloc.uSun, sun); gl.uniform1f(wloc.uFogN, fogN); gl.uniform1f(wloc.uFogF, fogF);
+    gl.uniform1f(wloc.uAmb, 0.5);
+    const drawWorld = (b, n, base) => {
+        gl.uniform3fv(wloc.uBase, base);
+        gl.bindBuffer(gl.ARRAY_BUFFER, b);
+        gl.enableVertexAttribArray(wloc.aPos); gl.vertexAttribPointer(wloc.aPos, 3, gl.FLOAT, false, 24, 0);
+        gl.enableVertexAttribArray(wloc.aNrm); gl.vertexAttribPointer(wloc.aNrm, 3, gl.FLOAT, false, 24, 12);
+        gl.drawArrays(gl.TRIANGLES, 0, n);
+    };
+    drawWorld(ground, 6, [0.11, 0.1, 0.082]);
+    if (bld) drawWorld(bld.b, bld.n, [0.27, 0.25, 0.21]);
 
-    gl.useProgram(prog);
-    gl.uniform1f(loc.uFogN, 8.0);            // nearer views are sharp; far ones sink to soot
-    gl.uniform1f(loc.uFogF, 72.0);
+    // roads
+    if (lines) { gl.useProgram(lprog); gl.uniformMatrix4fv(lloc.uVP, false, vp);
+        gl.uniform1f(lloc.uFogN, fogN); gl.uniform1f(lloc.uFogF, fogF);
+        gl.uniform1f(lloc.uAlpha, 0.22); gl.uniform3f(lloc.uCol, 0.33, 0.31, 0.27);
+        gl.bindBuffer(gl.ARRAY_BUFFER, lines.b);
+        gl.enableVertexAttribArray(lloc.aPos); gl.vertexAttribPointer(lloc.aPos, 3, gl.FLOAT, false, 0, 0);
+        gl.drawArrays(gl.LINES, 0, lines.n); }
 
-    gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf);
-    gl.enableVertexAttribArray(loc.aPos);
-    gl.vertexAttribPointer(loc.aPos, 2, gl.FLOAT, false, 16, 0);
-    gl.enableVertexAttribArray(loc.aUV);
-    gl.vertexAttribPointer(loc.aUV, 2, gl.FLOAT, false, 16, 8);
-    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, idxBuf);
-    gl.activeTexture(gl.TEXTURE0);
-    gl.uniform1i(loc.uTex, 0);
+    // the lost thing: a luminous wireframe where it really stood
+    if (ghost) { gl.useProgram(lprog); gl.uniformMatrix4fv(lloc.uVP, false, vp);
+        gl.uniform1f(lloc.uFogN, fogN); gl.uniform1f(lloc.uFogF, fogF);
+        gl.uniform1f(lloc.uAlpha, 0.9); gl.uniform3f(lloc.uCol, 0.95, 0.92, 0.84);
+        gl.bindBuffer(gl.ARRAY_BUFFER, ghost.b);
+        gl.enableVertexAttribArray(lloc.aPos); gl.vertexAttribPointer(lloc.aPos, 3, gl.FLOAT, false, 0, 0);
+        gl.drawArrays(gl.LINES, 0, ghost.n); }
 
-    // sort back-to-front for correct blending
-    const ord = S.views.map((v, i) => {
-        const dz = sub(v.pos, S.eye);
-        return { i, d: dot(dz, dz) };
-    }).sort((a, b) => b.d - a.d);
-
-    for (const o of ord) {
-        const v = S.views[o.i];
-        const entered = o.i === S.enterIdx;
-        const rv = entered ? 1 : Math.max(0, Math.min(1, (S.t * 9 - v.reveal * 0.6)));
-        if (rv <= 0) continue;
-        const model = uprightModel(v.pos, v.w, v.h, v.face);
-        gl.uniformMatrix4fv(loc.uMVP, false, mul(vp, model));
-        gl.uniformMatrix4fv(loc.uMV, false, mul(view, model));
-        // photo --- full resolution once you've stepped into it
-        const tex = entered && v.fullTex ? v.fullTex : (v.ready ? v.tex : sootTex);
-        gl.bindTexture(gl.TEXTURE_2D, tex);
-        gl.uniform1f(loc.uMode, 0);
-        gl.uniform1f(loc.uAlpha, 0.96 * rv);
-        gl.drawElements(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0);
-        // scratched frame
-        gl.uniform1f(loc.uMode, 1);
-        gl.uniform1f(loc.uAlpha, (entered ? 0.8 : 0.5) * rv);
-        gl.drawArrays(gl.LINE_LOOP, 0, 4);
+    // the surviving photographs, standing at the site
+    if (photos.length) {
+        gl.useProgram(pprog); gl.uniform1f(ploc.uFogN, fogN); gl.uniform1f(ploc.uFogF, fogF);
+        gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf);
+        gl.enableVertexAttribArray(ploc.aPos); gl.vertexAttribPointer(ploc.aPos, 2, gl.FLOAT, false, 16, 0);
+        gl.enableVertexAttribArray(ploc.aUV); gl.vertexAttribPointer(ploc.aUV, 2, gl.FLOAT, false, 16, 8);
+        gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, idxBuf); gl.activeTexture(gl.TEXTURE0); gl.uniform1i(ploc.uTex, 0);
+        for (const v of photos) {
+            const s = Math.sin(v.face), co = Math.cos(v.face);
+            const model = [co * v.w, 0, -s * v.w, 0, 0, v.h, 0, 0, s, 0, co, 0, v.pos[0], v.pos[1], v.pos[2], 1];
+            gl.uniformMatrix4fv(ploc.uMVP, false, mul(vp, model));
+            gl.uniformMatrix4fv(ploc.uMV, false, mul(view, model));
+            gl.bindTexture(gl.TEXTURE_2D, v.ready ? v.tex : sootTex);
+            gl.uniform1f(ploc.uMode, 0); gl.uniform1f(ploc.uAlpha, 0.98);
+            gl.drawElements(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0);
+            gl.uniform1f(ploc.uMode, 1); gl.uniform1f(ploc.uAlpha, 0.55);
+            gl.drawArrays(gl.LINE_LOOP, 0, 4);
+        }
     }
     S.raf = requestAnimationFrame(frame);
 }
 
-// ---- stepping into an eye -------------------------------------------------
-function project(p) {
-    const vp = S.vp; if (!vp) return null;
-    const x = vp[0] * p[0] + vp[4] * p[1] + vp[8] * p[2] + vp[12];
-    const y = vp[1] * p[0] + vp[5] * p[1] + vp[9] * p[2] + vp[13];
-    const w = vp[3] * p[0] + vp[7] * p[1] + vp[11] * p[2] + vp[15];
-    if (w <= 0) return null;
-    return [(x / w * 0.5 + 0.5) * cv.width, (1 - (y / w * 0.5 + 0.5)) * cv.height];
-}
-function pick(sx, sy) {
-    let best = -1, bestD = 1e9;
-    const thr = Math.min(cv.width, cv.height) * 0.16;
-    for (let i = 0; i < S.views.length; i++) {
-        const c = project(S.views[i].pos); if (!c) continue;
-        const d = Math.hypot(c[0] - sx, c[1] - sy);
-        if (d < thr && d < bestD) { bestD = d; best = i; }
-    }
-    return best;
-}
-// clicking an eye glides you right up to it, square-on, and loads its full
-// resolution --- you fly to it and it becomes the real thing filling your view.
-function flyToView(i) {
-    const v = S.views[i];
-    // the panel faces (sin face, 0, cos face); stand out in front of it on the
-    // ground, far enough back that it fills the view, and look up at it.
-    const nx = Math.sin(v.face), nz = Math.cos(v.face);
-    const fovy = 62 * Math.PI / 180, asp = cv.width / cv.height;
-    const distH = (v.h / 2) / Math.tan(fovy / 2);
-    const distW = (v.w / 2) / Math.tan(2 * Math.atan(Math.tan(fovy / 2) * asp) / 2);
-    const dist = Math.max(6, Math.min(distH, distW) * 1.1);
-    const pos = [v.pos[0] + nx * dist, EYE, v.pos[2] + nz * dist];
-    const yaw = Math.atan2(-nx, -nz);                 // face the panel
-    const pitch = Math.atan2(v.h / 2 - EYE, dist);    // tip head up to its middle
-    S.tgt = { pos, yaw, pitch };
-    S.enterIdx = i; loadFull(v); updateHud();
-}
-
-function updateHud() {
-    const v = S.enterIdx >= 0 ? S.views[S.enterIdx] : null;
-    const line = v ? [v.y != null ? v.y : null, (v.author || '').replace(/\s*\(.*$/, '') || null]
-        .filter(Boolean).join('   ·   ') : S.sub;
-    hud.innerHTML = `<div class="ch-title">${escapeHTML(S.title)}</div>` +
-        `<div class="ch-sub">${escapeHTML(line || S.sub)}</div>` +
-        `<div class="ch-hint">W A S D to walk&nbsp;&nbsp;·&nbsp;&nbsp;drag to look` +
-        `&nbsp;&nbsp;·&nbsp;&nbsp;click a view to walk up to it&nbsp;&nbsp;·&nbsp;&nbsp;esc to leave</div>`;
-}
-
-// ---- interaction: fly and look --------------------------------------------
-cv.addEventListener('pointerdown', e => {
-    S.dragging = true; S.moved = 0; S.lx = e.clientX; S.ly = e.clientY;
-    S.pid = e.pointerId; cv.setPointerCapture(e.pointerId); cv.classList.add('dragging');
-});
-cv.addEventListener('pointermove', e => {
-    if (!S.dragging) return;
-    const dx = e.clientX - S.lx, dy = e.clientY - S.ly;
-    S.lx = e.clientX; S.ly = e.clientY; S.moved += Math.abs(dx) + Math.abs(dy);
-    S.tgt = null;                                   // taking the stick back
-    S.yaw += dx * 0.004; S.pitch = Math.max(-1.45, Math.min(1.45, S.pitch - dy * 0.004));
-});
-cv.addEventListener('pointerup', e => {
-    S.dragging = false; cv.classList.remove('dragging');
-    if (S.moved >= 6) return;                        // a drag-look, not a click
-    const dpr = cv.width / innerWidth;
-    const idx = pick(e.clientX * dpr, e.clientY * dpr);
-    if (idx >= 0) flyToView(idx);                   // approach that surviving eye
-    else { S.enterIdx = -1; updateHud(); }          // click the void: deselect
-});
-cv.addEventListener('wheel', e => {
-    e.preventDefault();                             // scroll = stride forward/back
-    S.tgt = null;
-    const s = -e.deltaY * 0.01;
-    S.vel = [S.vel[0] + Math.sin(S.yaw) * s, 0, S.vel[2] + Math.cos(S.yaw) * s];
-}, { passive: false });
-addEventListener('keydown', e => {
-    if (!S.active) return;
+// ---- controls -------------------------------------------------------------
+cv.addEventListener('pointerdown', e => { S.dragging = true; S.moved = 0; S.lx = e.clientX; S.ly = e.clientY;
+    cv.setPointerCapture(e.pointerId); cv.classList.add('dragging'); });
+cv.addEventListener('pointermove', e => { if (!S.dragging) return;
+    const dx = e.clientX - S.lx, dy = e.clientY - S.ly; S.lx = e.clientX; S.ly = e.clientY;
+    S.moved += Math.abs(dx) + Math.abs(dy);
+    S.yaw += dx * 0.004; S.pitch = Math.max(-1.4, Math.min(1.4, S.pitch - dy * 0.004)); });
+cv.addEventListener('pointerup', e => { S.dragging = false; cv.classList.remove('dragging');
+    if (S.moved < 6) closeChamber(); });
+addEventListener('keydown', e => { if (!S.active) return;
     if (e.key === 'Escape') { closeChamber(); return; }
     const k = e.key.toLowerCase();
-    if ('wasdeqc '.includes(k) || k.startsWith('arrow') || k === 'shift') {
-        S.keys[k] = true; S.tgt = null; e.preventDefault();
-    }
-});
-addEventListener('keyup', e => {
-    if (!S.active) return;
-    S.keys[e.key.toLowerCase()] = false;
-});
+    if (k === ' ' && S.grounded) { S.vy = JUMP; S.grounded = false; }
+    if ('wasd '.includes(k) || k.startsWith('arrow')) { S.keys[k] = true; e.preventDefault(); } });
+addEventListener('keyup', e => { if (S.active) S.keys[e.key.toLowerCase()] = false; });
 addEventListener('resize', () => { if (S.active) resize(); });
 
 window.openChamber = openChamber;

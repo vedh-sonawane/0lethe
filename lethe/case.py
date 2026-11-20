@@ -27,7 +27,7 @@ from .detect import check
 from .extract import extract
 from .fingerprint import hexdigest, simhash, from_hex, hamming, similarity, BITS
 from .reconstruct import assemble
-from .sources import commons, wayback, wikidata, wikipedia, wikiquote, wikisource
+from .sources import commons, osm, wayback, wikidata, wikipedia, wikiquote, wikisource
 
 
 def _field_position(identity: str) -> tuple[float, float]:
@@ -503,6 +503,61 @@ def gather_views(conn, *, limit_ghosts: int = 8, per_ghost: int = 16, log=print)
         log(f"  «{(g['label'] or '')[:30]}» recomposed from {len(views)} surviving view(s)")
     log(f"visual reconstruction pass: {total} thing(s) recomposed from their surviving images")
     return total
+
+
+def gather_world(conn, *, limit_ghosts: int = 6, radius_m: float = 320.0, log=print) -> int:
+    """THE WORLD: bake the real 3D geometry of the place a lost thing stood in.
+
+    For each lost place, read the actual survey of that exact spot from
+    OpenStreetMap --- real building footprints and heights, streets, water --- and
+    store it so the machine can stand a whole walkable world up around where the
+    thing was. The geometry is real map data, never invented; the lost thing
+    itself is flagged so it can rise as a ghost in its true footprint."""
+    src = db.register_source(conn, "osm", "OpenStreetMap", "map", osm.TERMS)
+    rows = conn.execute(
+        "SELECT g.id, g.identity, g.label FROM ghost g WHERE g.kind='place' "
+        "AND NOT EXISTS(SELECT 1 FROM reconstruction r JOIN claim c ON c.reconstruction_id=r.id "
+        "              WHERE r.ghost_id=g.id AND c.field='world') "
+        "ORDER BY g.worth DESC, g.updated_at ASC LIMIT ?", (limit_ghosts,)).fetchall()
+    out = 0
+    for g in rows:
+        meta = None
+        for s in conn.execute("SELECT meta FROM shadow WHERE ghost_id=? AND meta LIKE '%lat%'", (g["id"],)):
+            try:
+                m = json.loads(s["meta"])
+            except Exception:
+                continue
+            if m and "lat" in m and "lon" in m:
+                meta = m
+                break
+        if not meta:
+            continue
+        qid = g["identity"].rsplit(":", 1)[-1]
+        w = osm.world_at(meta["lat"], meta["lon"], qid if qid.startswith("Q") else None,
+                         radius_m=radius_m, log=log)
+        if not w:
+            continue
+        recon = conn.execute("SELECT MAX(id) m FROM reconstruction WHERE ghost_id=?",
+                             (g["id"],)).fetchone()["m"]
+        if recon is None:
+            continue
+        payload = json.dumps(w, separators=(",", ":"))
+        sid = _record_shadow(conn, g["id"], src, "map",
+                             uri=f"https://www.openstreetmap.org/#map=18/{meta['lat']}/{meta['lon']}",
+                             meta={"buildings": len(w["buildings"])})
+        cid = int(conn.execute(
+            "INSERT INTO claim(reconstruction_id, field, value, status, confidence, rationale) "
+            "VALUES(?,?,?,?,?,?)",
+            (recon, "world", payload, "recovered", 0.9,
+             f"the real world around it: {len(w['buildings'])} mapped buildings with their true "
+             f"heights, streets and water, surveyed by OpenStreetMap --- to walk where it stood")).lastrowid)
+        conn.execute("INSERT OR IGNORE INTO claim_shadow(claim_id, shadow_id) VALUES(?,?)", (cid, sid))
+        conn.execute("UPDATE ghost SET updated_at=datetime('now') WHERE id=?", (g["id"],))
+        conn.commit()
+        out += 1
+        log(f"  world baked for «{(g['label'] or '')[:30]}» ({len(w['buildings'])} buildings)")
+    log(f"world pass: {out} place(s) given a walkable world")
+    return out
 
 
 def reconstruct_text(conn, author: str, epoch_year: float, *, log=print) -> int | None:

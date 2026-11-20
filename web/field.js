@@ -263,8 +263,8 @@ const esc = s => ('' + (s == null ? '' : s)).replace(/[&<>"]/g, c =>
 // follow a connection: clicking a linked thing focuses it and flies there
 readout.addEventListener('click', e => {
     const rc = e.target.closest('[data-recompose]');
-    if (rc && detail && detail._views && window.openChamber) {
-        window.openChamber(detail._views, detail.ghost); return;
+    if (rc && detail && (detail._views || detail._world) && window.openChamber) {
+        window.openChamber({ world: detail._world, views: detail._views || [] }, detail.ghost); return;
     }
     const row = e.target.closest('[data-ghost]');
     if (row) focusGhost(parseInt(row.dataset.ghost, 10));
@@ -299,8 +299,16 @@ function renderReadout() {
         h += `</div>`;
     }
 
-    detail._views = null;
+    detail._views = null; detail._world = null;
+    // the walkable world, baked from real map data — parsed first so the trigger
+    // can offer to step into it
     for (const c of (detail.claims || [])) {
+        if (c.field === 'world' && c.value) {
+            try { detail._world = JSON.parse(c.value); } catch (_) { detail._world = null; }
+        }
+    }
+    for (const c of (detail.claims || [])) {
+        if (c.field === 'world') continue;              // rendered as the enter trigger, not raw
         h += `<div class="r-claim ${c.status}">`;
         h += `<span class="r-field">${esc(c.field.replace(/_/g, ' '))}</span>`;
         h += `<span class="r-cmeta">${c.status} · ${(c.confidence).toFixed(2)}</span>`;
@@ -310,8 +318,10 @@ function renderReadout() {
             try { vs = JSON.parse(c.value); } catch (_) { vs = null; }
             if (vs && vs.length) {
                 detail._views = vs;
-                h += `<div class="r-recompose" data-recompose="1">◉ recomposed from ` +
-                     `<span class="n">${vs.length}</span> surviving eyes — enter</div>`;
+                const lbl = detail._world
+                    ? `◉ walk the place where it stood — enter`
+                    : `◉ recomposed from <span class="n">${vs.length}</span> surviving eyes — enter`;
+                h += `<div class="r-recompose" data-recompose="1">${lbl}</div>`;
             }
             h += `<div class="r-why">${esc(c.rationale)}</div>`;
             for (const t of (c.trail || []).slice(0, 2)) {
@@ -490,8 +500,8 @@ async function focusGhost(id) {
     focusId = id;
     detail = await loadJSON('/api/ghost/' + id, 'ghosts/' + id + '.json');
     renderReadout();
-    if (detail && detail._views && window.openChamber && /(^|&)rc=[12](&|$)/.test(location.hash))
-        window.openChamber(detail._views, detail.ghost);   // deep-link into a reconstruction
+    if (detail && (detail._views || detail._world) && window.openChamber && /(^|&)rc=[12](&|$)/.test(location.hash))
+        window.openChamber({ world: detail._world, views: detail._views || [] }, detail.ghost);
     const m = markById.get(id);        // fly the camera to the thing we just focused
     if (m) { camTarget.x = m.field_x; camTarget.y = m.field_y;
              camTarget.scale = Math.max(cam.scale, 2.0); }

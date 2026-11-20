@@ -26,8 +26,8 @@ import time
 from urllib.parse import urlparse
 
 from . import db
-from .case import (foresee_one, gather_views, recognize_fragments, recover_lost_texts,
-                   recover_lost_works, recover_structures, run_case)
+from .case import (foresee_one, gather_views, gather_world, recognize_fragments,
+                   recover_lost_texts, recover_lost_works, recover_structures, run_case)
 from .detect import check
 from .discover import convergence, unrecovered_convergent
 from .foresee import fragility
@@ -285,6 +285,14 @@ def run(conn, *, max_leads: int | None = None, max_seconds: float | None = None,
                     log(f"  reconstruction: {recomposed} thing(s) recomposed from surviving images")
             except Exception as e:
                 log(f"  reconstruction pass skipped: {type(e).__name__}")
+        # periodically bake the real walkable world around lost places (OSM)
+        if worked and worked % 110 == 0:
+            try:
+                built = gather_world(conn, limit_ghosts=2, log=quiet)
+                if built:
+                    log(f"  world: {built} place(s) given a real walkable world from the map")
+            except Exception as e:
+                log(f"  world pass skipped: {type(e).__name__}")
         # round-robin guarantees every medium progresses: the two slow crawls get
         # reserved slots, the web fills the rest --- no medium can monopolize.
         lead = None
